@@ -1,0 +1,11 @@
+# Local scripts or secret configs
+*.local
+.env
+*.secrets
+*.key
+*.lock
+
+# Termux cache and files
+$HOME/.termux
+termux.properties
+
