@@ -5,11 +5,11 @@ VENV_DIR=".venv"
 
 # Function to detect if script is being sourced
 _is_sourced() {
-  if [ -n "$ZSH_VERSION" ]; then
-    case $ZSH_EVAL_CONTEXT in *:file:*) return 0;; esac
-  elif [ -n "$KSH_VERSION" ]; then
+  if [ -n "${ZSH_VERSION-}" ]; then
+    case ${ZSH_EVAL_CONTEXT-} in *:file:*) return 0;; esac
+  elif [ -n "${KSH_VERSION-}" ]; then
     [ "$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")" != "$(cd -- "$(dirname -- "${.sh.file}")" && pwd -P)/$(basename -- "${.sh.file}")" ] && return 0
-  elif [ -n "$BASH_VERSION" ]; then
+  elif [ -n "${BASH_VERSION-}" ]; then
     (return 0 2>/dev/null) && return 0 || return 1
   else
     # Universal fallback: 'return' only works when sourced
