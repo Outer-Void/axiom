@@ -855,6 +855,9 @@ class OverwatchApp(App):
         width: 40%;
         min-width: 26;
         max-width: 50%;
+        border: solid {ACCENT_DIM};
+        background: {PANEL2};
+        padding: 1 1;
     }}
     #operate-desc-heading {{
         color: {ACCENT_DIM};
@@ -864,19 +867,8 @@ class OverwatchApp(App):
     }}
     #operate-desc {{
         border: solid {BORDER};
-        background: {PANEL2};
+        background: {PANEL};
         height: 1fr;
-    }}
-    #operate-pane.narrow #operate-columns {{
-        layout: vertical;
-    }}
-    #operate-pane.narrow #operate-right {{
-        width: 1fr;
-        max-width: 100%;
-    }}
-    #operate-pane.narrow #operate-desc {{
-        height: 8;
-        min-height: 6;
     }}
     """
 
@@ -892,6 +884,7 @@ class OverwatchApp(App):
         Binding("backspace", "collapse_node", "Collapse"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "ai_ping", "AI Ping"),
+        Binding("i", "toggle_intel", "Intel"),
         Binding("?", "help", "Help"),
         Binding("ctrl+c", "cancel", "Cancel"),
         Binding("k", "toggle_keyboard", "Keyboard"),
@@ -901,6 +894,7 @@ class OverwatchApp(App):
     is_narrow = reactive(False)
     terminal_visible = reactive(True)
     keyboard_visible = reactive(False)
+    intel_visible = reactive(True)
     cwd = reactive(REPO_ROOT)
 
     def __init__(self):
@@ -977,6 +971,8 @@ class OverwatchApp(App):
 
     def set_responsive_state(self, width: int) -> None:
         self.is_narrow = width < 120
+        if width < 100:
+            self.intel_visible = False
         self.update_layout()
 
     def update_layout(self) -> None:
@@ -984,6 +980,7 @@ class OverwatchApp(App):
         right = self.query_one("#right", TerminalPane)
         left = self.query_one("#left", Vertical)
         operate = self.query_one("#operate-pane", OperatePane)
+        operate_right = operate.query_one("#operate-right", Vertical)
         if self.is_narrow:
             body.add_class("narrow")
             right.add_class("narrow")
@@ -995,6 +992,7 @@ class OverwatchApp(App):
             left.remove_class("narrow")
             operate.remove_class("narrow")
         right.display = (not self.is_narrow) or self.terminal_visible
+        operate_right.display = self.intel_visible
         if right.display:
             right.refresh()
 
@@ -1045,6 +1043,10 @@ class OverwatchApp(App):
             self.update_layout()
         if not self.is_narrow or self.terminal_visible:
             self.focus_terminal_input()
+
+    def action_toggle_intel(self) -> None:
+        self.intel_visible = not self.intel_visible
+        self.update_layout()
 
     def action_toggle_keyboard(self) -> None:
         if not IS_TERMUX:
@@ -1361,14 +1363,14 @@ class OverwatchApp(App):
             lv.append(NavItem("No locker directory.", tag="__empty__"))
             preview.text = f"LOCKER_DIR not found: {LOCKER_DIR}\n"
             desc_title.update("No tool selected")
-            desc_body.text = "No description available."
+            desc_body.text = "Tool Intel unavailable (locker directory missing)."
             return
         tools = sorted([p for p in LOCKER_DIR.glob("*.sh") if p.is_file()], key=lambda p: p.name.lower())
         if not tools:
             lv.append(NavItem("No tools found.", tag="__empty__"))
             preview.text = "No *.sh tools found in locker.\n"
             desc_title.update("No tool selected")
-            desc_body.text = "No description available."
+            desc_body.text = "Tool Intel unavailable (no tools found)."
             return
         for t in tools:
             lv.append(NavItem(t.name, tag=str(t)))
@@ -1479,11 +1481,14 @@ class OverwatchApp(App):
         if tool is None:
             preview.text = "Select a tool, add args, press Enter to run (with confirmation).\n"
             desc_title.update("No tool selected")
-            desc_body.text = "No description available."
+            desc_body.text = "Select a tool to view intel."
             return
         tool_name = tool.name
         desc_title.update(tool_name)
-        desc_body.text = TOOL_DESCRIPTIONS.get(tool_name, "No description available.")
+        desc_body.text = TOOL_DESCRIPTIONS.get(
+            tool_name,
+            "No description available. Add a README entry or update TOOL_DESCRIPTIONS.",
+        )
         args = self.query_one("#operate-args", Input).value.strip()
         cmd = f"{tool} {args}".strip()
         preview.text = f"CWD: {self.cwd}\nPreview: {cmd}\n"
