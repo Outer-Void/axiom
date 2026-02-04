@@ -5,10 +5,14 @@ set -euo pipefail
 # Overwatch: Sentinel / Night Ops
 # Self-contained cross-platform TUI cockpit
 # - Left: modes (Observe / Files / Operate / Terminal / Signal / Config / About)
-# - Right: persistent terminal pane (always visible)
+# - Right: terminal pane (responsive; stacked or toggled in narrow mode)
 # - Global cwd shared across Files/Operate/Terminal
 # - Runs logging: runs/<ts>_<mode>_<action>/{output.log,metadata.json}
 # -------------------------------
+# How to test:
+#   ./cockpit/bin/overwatch.sh
+#   Resize terminal to <120 columns (or use a narrow Termux session) to trigger narrow mode.
+#   Keybinds: q quit, t toggle terminal (narrow mode), / search, tab cycle panes.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 COCKPIT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
@@ -442,9 +446,31 @@ def list_dir_entries(cwd: Path) -> Tuple[list, str]:
     files = sorted([p for p in entries if p.is_file()], key=lambda p: p.name.lower())
     return dirs + files, ""
 
+def truncate_text(text: str, max_len: int) -> str:
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len == 1:
+        return "…"
+    return text[: max_len - 1] + "…"
+
+def shorten_path(path: Path, max_len: int = 28) -> str:
+    s = str(path)
+    if len(s) <= max_len:
+        return s
+    parts = path.parts
+    if len(parts) >= 2:
+        base = parts[-1]
+        root = parts[0]
+        compact = f"{root}{os.sep}…{os.sep}{base}"
+        if len(compact) <= max_len:
+            return compact
+    return truncate_text(s, max_len)
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
@@ -482,8 +508,17 @@ class StatusHeader(Static):
     ai = reactive("AI: unavailable")
 
     def render(self) -> str:
-        t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return f"OVERWATCH / SENTINEL | {self.mode} | {CURRENT_PLATFORM} | CWD: {self.cwd} | {t} | {self.ai}"
+        app = self.app
+        app_size = getattr(app, "size", None)
+        width = self.size.width or (app_size.width if app_size else 80)
+        is_narrow = getattr(app, "is_narrow", False)
+        if is_narrow:
+            cwd_display = shorten_path(Path(self.cwd), max_len=26)
+            base = f"OVERWATCH | AXIOM | {self.mode} | {CURRENT_PLATFORM} | CWD: {cwd_display} | {self.ai}"
+        else:
+            t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            base = f"OVERWATCH | AXIOM | {self.mode} | {CURRENT_PLATFORM} | CWD: {self.cwd} | {t} | {self.ai}"
+        return truncate_text(base, max(1, width - 1))
 
 class NavItem(ListItem):
     def __init__(self, label: str, tag: str = ""):
@@ -518,7 +553,7 @@ class TerminalInfoPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Terminal Operations")
         yield TextArea(
-            "Use the right pane to run commands.\n"
+            "Use the terminal pane to run commands.\n"
             "Enter runs in current CWD.\n"
             "CTRL+C cancels the active command.\n",
             read_only=True,
@@ -540,10 +575,10 @@ class ConfigPane(Static):
 
 class AboutPane(Static):
     def compose(self) -> ComposeResult:
-        yield Label("OVERWATCH: SENTINEL / NIGHT OPS")
+        yield Label("OVERWATCH | AXIOM")
         yield TextArea(
-            "Mission terminal for JADIS Arsenal operations.\n"
-            "Left pane: modes. Right pane: persistent terminal.\n"
+            "Mission terminal for AXIOM operations.\n"
+            "Left pane: modes. Terminal pane: persistent shell.\n"
             "Safety: confirmations for destructive commands.\n",
             read_only=True,
         )
@@ -569,21 +604,39 @@ class OverwatchApp(App):
         color: {TEXT};
         padding: 1 2;
         border: solid {BORDER};
+        overflow-x: hidden;
     }}
     #body {{
         height: 1fr;
+        layout: horizontal;
+        overflow-x: hidden;
     }}
     #left {{
         width: 1fr;
-        min-width: 60;
+        min-width: 28;
         border: solid {BORDER};
         background: {PANEL};
+        overflow-x: hidden;
     }}
     #right {{
-        width: 60;
-        min-width: 48;
+        width: 40;
+        min-width: 30;
+        max-width: 50%;
         border: solid {BORDER};
         background: {PANEL};
+        overflow-x: hidden;
+    }}
+    #body.narrow {{
+        layout: vertical;
+    }}
+    #left.narrow {{
+        min-width: 20;
+    }}
+    #right.narrow {{
+        width: 1fr;
+        height: 12;
+        min-height: 12;
+        max-width: 100%;
     }}
     #nav {{
         background: {PANEL2};
@@ -595,6 +648,7 @@ class OverwatchApp(App):
         background: {PANEL};
         padding: 1 1;
         height: 1fr;
+        overflow-x: hidden;
     }}
     #footer {{
         background: #1b1d20;
@@ -640,6 +694,7 @@ class OverwatchApp(App):
         Binding("escape", "back", "Back"),
         Binding("tab", "focus_next", "Next Pane"),
         Binding("/", "search", "Search"),
+        Binding("t", "toggle_terminal", "Terminal"),
         Binding("enter", "enter", "Enter"),
         Binding("r", "refresh", "Refresh"),
         Binding("?", "help", "Help"),
@@ -647,6 +702,8 @@ class OverwatchApp(App):
     ]
 
     mode = reactive("Observe")
+    is_narrow = reactive(False)
+    terminal_visible = reactive(True)
 
     def __init__(self):
         super().__init__()
@@ -660,7 +717,7 @@ class OverwatchApp(App):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield StatusHeader(id="header")
-            with Horizontal(id="body"):
+            with Container(id="body"):
                 with Vertical(id="left"):
                     yield ListView(id="nav")
                     with Container(id="main"):
@@ -693,6 +750,31 @@ class OverwatchApp(App):
         self.refresh_all()
         nav.focus()
         self._locker_desc = self.load_locker_descriptions()
+        self.set_responsive_state(self.size.width)
+
+    def on_resize(self, event) -> None:
+        self.set_responsive_state(event.size.width)
+        self.query_one(StatusHeader).refresh()
+
+    def set_responsive_state(self, width: int) -> None:
+        self.is_narrow = width < 120
+        self.update_layout()
+
+    def update_layout(self) -> None:
+        body = self.query_one("#body", Container)
+        right = self.query_one("#right", TerminalPane)
+        left = self.query_one("#left", Vertical)
+        if self.is_narrow:
+            body.add_class("narrow")
+            right.add_class("narrow")
+            left.add_class("narrow")
+        else:
+            body.remove_class("narrow")
+            right.remove_class("narrow")
+            left.remove_class("narrow")
+        right.display = (not self.is_narrow) or self.terminal_visible
+        if right.display:
+            right.refresh()
 
     def update_ai_status(self) -> None:
         env = load_env_file(ENV_FILE)
@@ -727,6 +809,13 @@ class OverwatchApp(App):
             self.query_one("#files-path", Input).focus()
         elif self.mode == "Observe":
             self.query_one("#observe-filter", Input).focus()
+
+    def action_toggle_terminal(self) -> None:
+        if self.is_narrow:
+            self.terminal_visible = not self.terminal_visible
+            self.update_layout()
+        if not self.is_narrow or self.terminal_visible:
+            self.query_one("#term-cmd", Input).focus()
 
     def action_refresh(self) -> None:
         self.refresh_all()
