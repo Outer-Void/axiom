@@ -9,8 +9,24 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+COCKPIT_DIR="$(cd -P "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
+
+# shellcheck source=../core/constants.sh
+source "${COCKPIT_DIR}/core/constants.sh"
+# shellcheck source=../core/shell.sh
+source "${COCKPIT_DIR}/core/shell.sh"
+# shellcheck source=../core/log.sh
+source "${COCKPIT_DIR}/core/log.sh"
+# shellcheck source=../core/platform.sh
+source "${COCKPIT_DIR}/core/platform.sh"
+# shellcheck source=../core/env.sh
+source "${COCKPIT_DIR}/core/env.sh"
+# shellcheck source=../core/runs.sh
+source "${COCKPIT_DIR}/core/runs.sh"
+
 AXIOM_VERSION="1.0.0"
-AXIOM_REPO="https://github.com/Justadudeinspace/axiom"
+AXIOM_REPO="${AXIOM_REPO_URL}"
 AXIOM_LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/axiom/logs"
 AXIOM_LOG_FILE="${AXIOM_LOG_DIR}/axiom-shell-install-$(date +%Y%m%d-%H%M%S).log"
 AXIOM_ZSHRC_MARKER_START="### >>> AXIOM SHELL CONFIG >>>"
@@ -19,6 +35,11 @@ AXIOM_ZSHRC_MARKER_END="### <<< AXIOM SHELL CONFIG <<<"
 SILENT_MODE=0
 DEBUG_MODE=0
 NO_ZSHRC=0
+
+RUN_DIR=""
+RUN_STARTED_AT=""
+RUN_COMMAND_LINE=""
+RUN_CWD=""
 
 is_sourced() {
   [[ "${BASH_SOURCE[0]}" != "${0}" ]]
@@ -55,20 +76,8 @@ log_init() {
   else
     exec 1> >(tee -a "${AXIOM_LOG_FILE}") 2>&1
   fi
-  echo "[AXIOM] Log started: $(date -Iseconds)"
-  echo "[AXIOM] Log file: ${AXIOM_LOG_FILE}"
-}
-
-log_info() {
-  echo "[AXIOM][INFO] $*"
-}
-
-log_warn() {
-  echo "[AXIOM][WARN] $*"
-}
-
-log_error() {
-  echo "[AXIOM][ERROR] $*" >&2
+  axiom_log_info "Log started: $(date -Iseconds)"
+  axiom_log_info "Log file: ${AXIOM_LOG_FILE}"
 }
 
 parse_args() {
@@ -91,7 +100,7 @@ parse_args() {
         safe_exit 0
         ;;
       *)
-        log_warn "Unknown argument: $1"
+        axiom_log_warn "Unknown argument: $1"
         shift
         ;;
     esac
@@ -100,19 +109,15 @@ parse_args() {
 
 OS_FAMILY=""
 ENVIRONMENT="native"
-
-is_termux() {
-  [[ -n "${TERMUX_VERSION:-}" ]] || [[ -n "${PREFIX:-}" && "${PREFIX}" == /data/data/com.termux/files/usr* ]] || [[ -d "/data/data/com.termux/files/usr" ]]
-}
+PLATFORM_LABEL=""
 
 detect_platform() {
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    OS_FAMILY="macos"
-    return 0
-  fi
+  local platform
+  platform="$(axiom_detect_platform)"
+  PLATFORM_LABEL="${platform}"
 
-  if is_termux; then
-    if [[ -f "/etc/os-release" ]] && command -v apt-get >/dev/null 2>&1; then
+  if axiom_is_termux; then
+    if [[ -f "/etc/os-release" ]] && axiom_command_exists apt-get; then
       ENVIRONMENT="proot"
       OS_FAMILY="debian"
       return 0
@@ -122,20 +127,31 @@ detect_platform() {
     return 0
   fi
 
-  if [[ -f "/etc/os-release" ]]; then
-    # shellcheck disable=SC1091
-    source /etc/os-release
-    if [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* || "${ID_LIKE:-}" == *ubuntu* ]]; then
-      OS_FAMILY="debian"
-      return 0
+  if [[ "${platform}" == "wsl" ]]; then
+    platform="linux"
+  fi
+
+  if [[ "${platform}" == "linux" ]]; then
+    if [[ -f "/etc/os-release" ]]; then
+      # shellcheck disable=SC1091
+      source /etc/os-release
+      if [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* || "${ID_LIKE:-}" == *ubuntu* ]]; then
+        OS_FAMILY="debian"
+        return 0
+      fi
     fi
+  fi
+
+  if [[ "${platform}" == "macos" ]]; then
+    OS_FAMILY="macos"
+    return 0
   fi
 
   OS_FAMILY="unsupported"
 }
 
 get_sudo_prefix() {
-  if command -v sudo >/dev/null 2>&1 && [[ "${EUID}" -ne 0 ]]; then
+  if axiom_command_exists sudo && [[ "${EUID}" -ne 0 ]]; then
     echo "sudo"
   fi
 }
@@ -168,26 +184,26 @@ apt_install_optional() {
   local pkg="$1"
   if apt_is_package_available "${pkg}"; then
     if apt_get_install "${pkg}"; then
-      log_info "Installed optional package: ${pkg}"
+      axiom_log_info "Installed optional package: ${pkg}"
     else
-      log_warn "Optional package failed: ${pkg}"
+      axiom_log_warn "Optional package failed: ${pkg}"
     fi
   else
-    log_warn "Optional package not available: ${pkg}"
+    axiom_log_warn "Optional package not available: ${pkg}"
   fi
 }
 
 pkg_install_optional() {
   local pkg="$1"
   if pkg install -y "${pkg}"; then
-    log_info "Installed optional package: ${pkg}"
+    axiom_log_info "Installed optional package: ${pkg}"
   else
-    log_warn "Optional package failed: ${pkg}"
+    axiom_log_warn "Optional package failed: ${pkg}"
   fi
 }
 
 install_dependencies() {
-  log_info "Installing dependencies for ${OS_FAMILY} (${ENVIRONMENT})"
+  axiom_log_info "Installing dependencies for ${OS_FAMILY} (${ENVIRONMENT}) [${PLATFORM_LABEL}]"
 
   case "${OS_FAMILY}" in
     debian)
@@ -207,35 +223,35 @@ install_dependencies() {
       pkg_install_optional neofetch
       ;;
     macos)
-      if command -v brew >/dev/null 2>&1; then
+      if axiom_command_exists brew; then
         brew update
         brew install zsh git curl wget unzip ca-certificates fontconfig fzf ripgrep jq
         brew install bat eza fd neofetch || true
       else
-        log_warn "Homebrew not found. Install dependencies manually: https://brew.sh"
+        axiom_log_warn "Homebrew not found. Install dependencies manually: https://brew.sh"
       fi
       ;;
     *)
-      log_error "Unsupported platform. Supported: Debian/Ubuntu, Termux, macOS."
+      axiom_log_error "Unsupported platform. Supported: Debian/Ubuntu, Termux, macOS."
       safe_exit 1
       ;;
   esac
 }
 
 install_oh_my_zsh() {
-  log_info "Installing oh-my-zsh"
+  axiom_log_info "Installing oh-my-zsh"
   local omz_dir="$HOME/.oh-my-zsh"
 
   if [[ -d "${omz_dir}/.git" ]]; then
-    log_info "Updating oh-my-zsh"
+    axiom_log_info "Updating oh-my-zsh"
     if ! git -C "${omz_dir}" pull --ff-only; then
-      log_warn "oh-my-zsh update failed"
+      axiom_log_warn "oh-my-zsh update failed"
     fi
     return 0
   fi
 
   if [[ -d "${omz_dir}" ]]; then
-    log_warn "oh-my-zsh directory exists without git metadata; skipping clone"
+    axiom_log_warn "oh-my-zsh directory exists without git metadata; skipping clone"
     return 0
   fi
 
@@ -243,19 +259,19 @@ install_oh_my_zsh() {
 }
 
 install_powerlevel10k() {
-  log_info "Installing powerlevel10k"
+  axiom_log_info "Installing powerlevel10k"
   local theme_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
 
   if [[ -d "${theme_dir}/.git" ]]; then
-    log_info "Updating powerlevel10k"
+    axiom_log_info "Updating powerlevel10k"
     if ! git -C "${theme_dir}" pull --ff-only; then
-      log_warn "powerlevel10k update failed"
+      axiom_log_warn "powerlevel10k update failed"
     fi
     return 0
   fi
 
   if [[ -d "${theme_dir}" ]]; then
-    log_warn "powerlevel10k directory exists without git metadata; skipping clone"
+    axiom_log_warn "powerlevel10k directory exists without git metadata; skipping clone"
     return 0
   fi
 
@@ -263,19 +279,19 @@ install_powerlevel10k() {
 }
 
 install_zplug() {
-  log_info "Installing zplug"
+  axiom_log_info "Installing zplug"
   local zplug_home="${ZPLUG_HOME:-$HOME/.zplug}"
 
   if [[ -d "${zplug_home}/.git" ]]; then
-    log_info "Updating zplug"
+    axiom_log_info "Updating zplug"
     if ! git -C "${zplug_home}" pull --ff-only; then
-      log_warn "zplug update failed"
+      axiom_log_warn "zplug update failed"
     fi
     return 0
   fi
 
   if [[ -d "${zplug_home}" ]]; then
-    log_warn "zplug directory exists without git metadata; skipping clone"
+    axiom_log_warn "zplug directory exists without git metadata; skipping clone"
     return 0
   fi
 
@@ -336,7 +352,7 @@ backup_zshrc() {
   if [[ -f "${zshrc_file}" ]]; then
     local backup="${zshrc_file}.bak.$(date +%Y%m%d-%H%M%S)"
     cp "${zshrc_file}" "${backup}"
-    log_info "Backed up .zshrc to ${backup}"
+    axiom_log_info "Backed up .zshrc to ${backup}"
   fi
 }
 
@@ -352,7 +368,7 @@ ensure_zshrc_block() {
 
   if grep -qF "${AXIOM_ZSHRC_MARKER_START}" "${zshrc_file}"; then
     local tmp
-    tmp="$(mktemp)"
+    tmp="$(axiom_mktemp)"
     awk -v start="${AXIOM_ZSHRC_MARKER_START}" -v end="${AXIOM_ZSHRC_MARKER_END}" -v block="${block}" '
       $0 == start {print block; in_block=1; next}
       $0 == end {in_block=0; next}
@@ -366,15 +382,15 @@ ensure_zshrc_block() {
 
 run_zplug_install() {
   if [[ "${NO_ZSHRC}" -eq 1 ]]; then
-    log_warn "Skipping zplug install because --no-zshrc was set"
+    axiom_log_warn "Skipping zplug install because --no-zshrc was set"
     return 0
   fi
 
-  if command -v zsh >/dev/null 2>&1; then
-    log_info "Installing zplug plugins"
+  if axiom_command_exists zsh; then
+    axiom_log_info "Installing zplug plugins"
     ZPLUG_HOME="${ZPLUG_HOME:-$HOME/.zplug}" zsh -lc 'source ~/.zshrc; zplug install --verbose'
   else
-    log_warn "zsh not available to run zplug install"
+    axiom_log_warn "zsh not available to run zplug install"
   fi
 }
 
@@ -388,33 +404,52 @@ Repo: ${AXIOM_REPO}
 EOF
 }
 
+record_run_metadata() {
+  local exit_code="$1"
+  local ended_at
+  ended_at="$(axiom_now_utc)"
+  axiom_runs_write_metadata "${RUN_DIR}" "setup" "blux10k" "${RUN_COMMAND_LINE}" "${exit_code}" "${RUN_STARTED_AT}" "${ended_at}" "${RUN_CWD}"
+}
+
 main() {
   parse_args "$@"
   log_init
   print_banner
 
+  RUN_DIR="$(axiom_runs_create_dir "setup" "blux10k")"
+  RUN_STARTED_AT="$(axiom_now_utc)"
+  RUN_CWD="$(pwd -P)"
+  printf -v RUN_COMMAND_LINE '%q ' "$0" "$@"
+  RUN_COMMAND_LINE="${RUN_COMMAND_LINE% }"
+  trap 'record_run_metadata "$?"' EXIT
+
   detect_platform
   if [[ "${OS_FAMILY}" == "unsupported" ]]; then
-    log_error "Unsupported platform detected."
+    axiom_log_error "Unsupported platform detected."
     safe_exit 1
   fi
 
+  axiom_runs_write_output "${RUN_DIR}" "install zsh"
   install_dependencies
+  axiom_runs_write_output "${RUN_DIR}" "install oh-my-zsh"
   install_oh_my_zsh
+  axiom_runs_write_output "${RUN_DIR}" "install powerlevel10k"
   install_powerlevel10k
+  axiom_runs_write_output "${RUN_DIR}" "install zplug"
   install_zplug
 
   if [[ "${NO_ZSHRC}" -eq 0 ]]; then
     backup_zshrc
     ensure_zshrc_block
+    axiom_runs_write_output "${RUN_DIR}" "update .zshrc"
   else
-    log_warn "Skipping .zshrc modification (--no-zshrc)"
+    axiom_log_warn "Skipping .zshrc modification (--no-zshrc)"
   fi
 
   run_zplug_install
 
-  log_info "AXIOM shell environment ready."
-  log_info "Restart your terminal or run: exec zsh"
+  axiom_log_info "AXIOM shell environment ready."
+  axiom_log_info "Restart your terminal or run: exec zsh"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
