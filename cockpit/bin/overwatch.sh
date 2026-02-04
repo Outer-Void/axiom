@@ -365,6 +365,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
+import urllib.error
+import urllib.request
 
 CURRENT_PLATFORM = "${PLATFORM}"
 
@@ -375,6 +377,7 @@ RUNS_DIR = Path("${RUNS_DIR}").resolve()
 CONFIG_DIR = Path("${CONFIG_DIR}").resolve()
 ENV_FILE = Path("${ENV_FILE}").resolve()
 LOCKER_DIR = Path("${LOCKER_DIR}").resolve()
+AI_LOG_PATH = RUNS_DIR / "ai_output.log"
 
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -428,6 +431,14 @@ def load_env_file(path: Path) -> dict:
         data[k.strip()] = v
     return data
 
+def merge_env_file(path: Path) -> dict:
+    env = load_env_file(path)
+    for key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"):
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+    return env
+
 def now_utc() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -466,6 +477,40 @@ def tail_text(path: Path, max_chars: int = 9000) -> str:
         return data[-max_chars:]
     except Exception:
         return "(unable to read)"
+
+def sanitize_ai_text(text: str, secret: str = "") -> str:
+    safe = "".join(ch for ch in text if ch.isprintable() or ch in "\n\t")
+    if secret:
+        safe = safe.replace(secret, "[redacted]")
+    if "OPENAI_API_KEY" in safe:
+        safe = safe.replace("OPENAI_API_KEY", "OPENAI_API_KEY[redacted]")
+    return safe
+
+def extract_ai_text(raw: str) -> str:
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return raw.strip()
+    if isinstance(data, dict):
+        if isinstance(data.get("output_text"), str):
+            return data["output_text"].strip()
+        output = data.get("output")
+        if isinstance(output, list):
+            chunks = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") in ("output_text", "text") and isinstance(part.get("text"), str):
+                        chunks.append(part["text"])
+            if chunks:
+                return "\n".join(chunks).strip()
+    return raw.strip()
 
 def list_dir_entries(cwd: Path) -> Tuple[list, str]:
     try:
@@ -675,6 +720,17 @@ class OverwatchApp(App):
         border: solid {BORDER};
         overflow-x: hidden;
     }}
+    #ai-window {{
+        dock: top;
+        height: 6;
+        border: solid {ACCENT_DIM};
+        background: #101214;
+        color: {TEXT};
+        padding: 0 1;
+    }}
+    #ai-window:focus {{
+        border: solid {ACCENT};
+    }}
     #body {{
         height: 1fr;
         layout: horizontal;
@@ -779,6 +835,7 @@ class OverwatchApp(App):
         Binding("p", "preview", "Preview"),
         Binding("backspace", "collapse_node", "Collapse"),
         Binding("r", "refresh", "Refresh"),
+        Binding("a", "ai_ping", "AI Ping"),
         Binding("?", "help", "Help"),
         Binding("ctrl+c", "cancel", "Cancel"),
         Binding("k", "toggle_keyboard", "Keyboard"),
@@ -799,10 +856,17 @@ class OverwatchApp(App):
         self._locker_desc = {}
         self._files_fallback_roots: list["FileNode"] = []
         self._files_fallback_visible: list["FileNode"] = []
+        self._ai_buffer = ""
+        self._ai_log_path = AI_LOG_PATH
+        self._ai_max_chars = 4000
+        self._ai_unavailable_emitted = False
+        self._ai_model = ""
+        self._ai_base_url = "https://api.openai.com/v1"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield StatusHeader(id="header")
+            yield TextArea(id="ai-window", read_only=True)
             with Container(id="body"):
                 with Vertical(id="left"):
                     yield ListView(id="nav")
@@ -831,6 +895,7 @@ class OverwatchApp(App):
             nav.append(NavItem(name))
         nav.index = 0
         self.update_ai_status()
+        self.initialize_ai_window()
         self.update_cwd_labels()
         self.switch_mode("Observe")
         self.refresh_all()
@@ -877,11 +942,16 @@ class OverwatchApp(App):
             right.refresh()
 
     def update_ai_status(self) -> None:
-        env = load_env_file(ENV_FILE)
+        env = merge_env_file(ENV_FILE)
         key_ok = bool(env.get("OPENAI_API_KEY", "").strip())
         model = env.get("OPENAI_MODEL", "").strip()
         hdr = self.query_one(StatusHeader)
         hdr.ai = f"AI: {model}" if (key_ok and model) else "AI: unavailable"
+        if key_ok and model:
+            self._ai_model = model
+        base_url = env.get("OPENAI_BASE_URL", "").strip()
+        if base_url:
+            self._ai_base_url = base_url
 
     def update_cwd_labels(self) -> None:
         hdr = self.query_one(StatusHeader)
@@ -1246,11 +1316,98 @@ class OverwatchApp(App):
         env_path = ENV_FILE
         if not env_path.exists() and (CONFIG_DIR / ".env.example").exists():
             env_path = CONFIG_DIR / ".env.example"
-        env = load_env_file(env_path)
+        env = merge_env_file(env_path)
         lines = [f"Config file: {env_path}\n"]
         lines.append(f"OPENAI_API_KEY: {'set' if env.get('OPENAI_API_KEY') else 'not set'}\n")
         lines.append(f"OPENAI_MODEL: {env.get('OPENAI_MODEL','not set') or 'not set'}\n")
         self.query_one("#config-text", TextArea).text = "".join(lines)
+
+    def initialize_ai_window(self) -> None:
+        env = merge_env_file(ENV_FILE)
+        key = env.get("OPENAI_API_KEY", "").strip()
+        model = env.get("OPENAI_MODEL", "").strip()
+        if key and model:
+            self.ai_emit("startup", f"AI online: model={model}", status="ok", model=model)
+        else:
+            self.ai_emit("startup", "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL", status="error")
+            self._ai_unavailable_emitted = True
+
+    def ai_emit(self, action: str, text: str, status: str = "ok", model: str = "") -> None:
+        env = merge_env_file(ENV_FILE)
+        secret = env.get("OPENAI_API_KEY", "").strip()
+        safe_text = sanitize_ai_text(text, secret=secret)
+        model_name = model or env.get("OPENAI_MODEL", "").strip() or self._ai_model or "unknown"
+        timestamp = now_utc()
+        header = f"[{timestamp}] model={model_name} action={action} status={status}"
+        entry = f"{header}\n{safe_text}\n"
+        self._ai_buffer = (self._ai_buffer + entry)[-self._ai_max_chars :]
+        ai_window = self.query_one("#ai-window", TextArea)
+        ai_window.text = self._ai_buffer
+        ai_window.scroll_end(animate=False)
+        try:
+            self._ai_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._ai_log_path.open("a", encoding="utf-8", errors="ignore") as f:
+                f.write(f"{header}\n{safe_text}\n--- end ---\n")
+        except Exception:
+            pass
+
+    def ai_error(self, action: str, err: str) -> None:
+        self.ai_emit(action, err, status="error")
+
+    async def action_ai_ping(self) -> None:
+        asyncio.create_task(self.run_ai_ping())
+
+    async def run_ai_ping(self) -> None:
+        action = "ai_ping"
+        env = merge_env_file(ENV_FILE)
+        key = env.get("OPENAI_API_KEY", "").strip()
+        model = env.get("OPENAI_MODEL", "").strip()
+        base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
+        if not key or not model:
+            msg = "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL"
+            self.ai_emit(action, msg, status="error")
+            return
+        self._ai_model = model
+        self._ai_base_url = base_url.rstrip("/")
+        self.ai_emit(action, "Requesting analysis...", status="info", model=model)
+
+        run_dir = make_run_dir("ai", "ping")
+        out_path = run_dir / "output.log"
+        started = now_utc()
+        exit_code = 1
+        response_text = ""
+
+        def do_request() -> str:
+            payload = {"model": model, "input": "Say ok"}
+            data = json.dumps(payload).encode("utf-8")
+            url = f"{self._ai_base_url}/responses"
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+
+        try:
+            raw = await asyncio.to_thread(do_request)
+            response_text = extract_ai_text(raw) or raw
+            self.ai_emit(action, response_text, status="ok", model=model)
+            exit_code = 0
+        except Exception as e:
+            err = f"AI call failed: {e}"
+            self.ai_error(action, err)
+            response_text = err
+            exit_code = 1
+        finally:
+            try:
+                out_path.write_text(response_text, encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+            write_metadata(run_dir, "ai", "ping", "openai.responses", self.cwd, exit_code, started, now_utc())
 
     def load_locker_descriptions(self) -> dict:
         desc = {}
