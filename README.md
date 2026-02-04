@@ -28,6 +28,20 @@ axiom/
 
 ---
 
+## Install & Launch 
+
+```
+# Install AXIOM
+git clone https://github.com/Justadudeinspace/axiom.git
+cd axiom
+./axiom.sh
+
+# Launch AXIOM
+./launch.sh
+```
+
+---
+
 ## `cockpit/` — the command deck
 
 The cockpit is the heart of AXIOM. It prepares, builds, and operates the developer environment.
