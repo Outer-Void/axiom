@@ -189,9 +189,15 @@ run_stage() {
     return 0
   fi
 
-  # Execute with timeout protection
-  timeout 1800 "$path"  # 30 minute timeout
-  local exit_code=$?
+  # Execute with timeout protection when available
+  local exit_code
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 1800 "$path"  # 30 minute timeout
+    exit_code=$?
+  else
+    "$path"
+    exit_code=$?
+  fi
   
   ended=$(date +%s)
   duration=$((ended - started))

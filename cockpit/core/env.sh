@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Strip inline comments while respecting quotes.
 # FIXED: Added input length limit to prevent DoS

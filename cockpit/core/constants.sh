@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Stable identity constants.
 AXIOM_NAME="AXIOM"

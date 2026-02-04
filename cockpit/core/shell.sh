@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # Check whether a command exists in PATH.
 axiom_command_exists() {
