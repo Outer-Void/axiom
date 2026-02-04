@@ -359,6 +359,8 @@ import json
 import os
 import platform as _platform
 import shlex
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -374,6 +376,33 @@ ENV_FILE = Path("${ENV_FILE}").resolve()
 LOCKER_DIR = Path("${LOCKER_DIR}").resolve()
 
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+TERMUX_VERSION = os.environ.get("TERMUX_VERSION", "")
+TERMUX_PATH = os.environ.get("PATH", "")
+TERMUX_PREFIX = os.environ.get("PREFIX", "")
+IS_TERMUX = bool(TERMUX_VERSION) or "/data/data/com.termux" in TERMUX_PATH or "com.termux" in TERMUX_PREFIX
+TERMUX_HIDE_ON_SUBMIT = os.environ.get("OVERWATCH_TERMUX_HIDE_ON_SUBMIT", "").lower() in ("1", "true", "yes", "on")
+
+def termux_keyboard(show: bool) -> None:
+    if not IS_TERMUX:
+        return
+    action = "show" if show else "hide"
+    if shutil.which("termux-keyboard"):
+        subprocess.Popen(
+            ["termux-keyboard", action],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return
+    if shutil.which("termux-api"):
+        try:
+            subprocess.Popen(
+                ["termux-api", "Keyboard", action],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return
 
 def load_env_file(path: Path) -> dict:
     data = {}
@@ -587,7 +616,7 @@ class TerminalPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Terminal", id="term-title")
         yield Label("", id="term-cwd")
-        yield Input(placeholder="Command (press Enter to run)", id="term-cmd")
+        yield Input(placeholder="Command (Enter runs)", id="term-cmd")
         yield TextArea(id="term-output", read_only=True)
 
 class OverwatchApp(App):
@@ -699,11 +728,13 @@ class OverwatchApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("?", "help", "Help"),
         Binding("ctrl+c", "cancel", "Cancel"),
+        Binding("k", "toggle_keyboard", "Keyboard"),
     ]
 
     mode = reactive("Observe")
     is_narrow = reactive(False)
     terminal_visible = reactive(True)
+    keyboard_visible = reactive(False)
 
     def __init__(self):
         super().__init__()
@@ -751,6 +782,19 @@ class OverwatchApp(App):
         nav.focus()
         self._locker_desc = self.load_locker_descriptions()
         self.set_responsive_state(self.size.width)
+        self.update_terminal_help()
+
+    def update_terminal_help(self) -> None:
+        info = self.query_one("#terminal-pane", TerminalInfoPane)
+        lines = [
+            "Use the terminal pane to run commands.",
+            "Enter runs in current CWD.",
+            "CTRL+C cancels the active command.",
+            "Esc returns focus to nav.",
+        ]
+        if IS_TERMUX:
+            lines.append("k toggles keyboard (Termux).")
+        info.query_one(TextArea).text = "\n".join(lines) + "\n"
 
     def on_resize(self, event) -> None:
         self.set_responsive_state(event.size.width)
@@ -800,6 +844,8 @@ class OverwatchApp(App):
         self.signal.display = (name == "Signal")
         self.config.display = (name == "Config")
         self.about.display = (name == "About")
+        if name == "Terminal":
+            self.focus_terminal_input()
 
     def action_back(self) -> None:
         self.query_one("#nav", ListView).focus()
@@ -815,7 +861,26 @@ class OverwatchApp(App):
             self.terminal_visible = not self.terminal_visible
             self.update_layout()
         if not self.is_narrow or self.terminal_visible:
-            self.query_one("#term-cmd", Input).focus()
+            self.focus_terminal_input()
+
+    def action_toggle_keyboard(self) -> None:
+        if not IS_TERMUX:
+            return
+        if self.mode != "Terminal" and not self.terminal_visible:
+            return
+        self.set_keyboard_visible(not self.keyboard_visible)
+
+    def focus_terminal_input(self) -> None:
+        term_input = self.query_one("#term-cmd", Input)
+        term_input.focus()
+        self.set_keyboard_visible(True)
+
+    def set_keyboard_visible(self, show: bool) -> None:
+        if not IS_TERMUX:
+            self.keyboard_visible = False
+            return
+        self.keyboard_visible = show
+        termux_keyboard(show)
 
     def action_refresh(self) -> None:
         self.refresh_all()
@@ -1001,9 +1066,21 @@ class OverwatchApp(App):
                 return
             event.input.value = ""
             asyncio.create_task(self.run_terminal_command(cmd))
+            if TERMUX_HIDE_ON_SUBMIT:
+                self.set_keyboard_visible(False)
         elif event.input.id == "observe-filter":
             self._observe_filter = event.value.strip().lower()
             self.refresh_observe()
+
+    def on_descendant_focus(self, event) -> None:
+        control = getattr(event, "control", None)
+        if getattr(control, "id", None) == "term-cmd":
+            self.set_keyboard_visible(True)
+
+    def on_descendant_blur(self, event) -> None:
+        control = getattr(event, "control", None)
+        if getattr(control, "id", None) == "term-cmd":
+            self.set_keyboard_visible(False)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "observe-filter":
