@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+CORE_DIR="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
+
+# shellcheck disable=SC1091
+. "$CORE_DIR/lib/armory_state.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: armory-run -- <command> [args...]
+USAGE
+}
+
+fail_user() {
+  printf 'Error: %s\n' "$1" >&2
+  exit 1
+}
+
+state_file_readable() {
+  [ -r "$ARMORY_STATE_FILE" ]
+}
+
+main() {
+  if [ "$#" -lt 2 ]; then
+    usage
+    exit 1
+  fi
+
+  if [ "$1" != "--" ]; then
+    fail_user "Expected -- before command."
+  fi
+  shift
+
+  if [ "$#" -eq 0 ]; then
+    fail_user "No command provided."
+  fi
+
+  local json active weapon
+  if json="$(armory_state_read 2>/dev/null)"; then
+    active="$(armory_state__parse_value "active" "$json" || printf '%s' "false")"
+    weapon="$(armory_state__parse_value "weapon" "$json" || printf '%s' "")"
+  else
+    if state_file_readable; then
+      printf '%s\n' "[INTERCEPTED] armory state unavailable; execution blocked"
+      exit 1
+    fi
+    active="false"
+    weapon=""
+  fi
+
+  if [ "$active" = "true" ]; then
+    printf '%s\n' "[INTERCEPTED] $weapon engaged; execution disabled in v0.1"
+    exit 1
+  fi
+
+  exec "$@"
+}
+
+main "$@"

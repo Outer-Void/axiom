@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+CORE_DIR="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
+
+# shellcheck disable=SC1091
+. "$CORE_DIR/lib/armory_state.sh"
+# shellcheck disable=SC1091
+. "$CORE_DIR/lib/armory_registry.sh"
+# shellcheck disable=SC1091
+. "$CORE_DIR/lib/armory_ui.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: armory <command> [options]
+
+Commands:
+  status
+  list
+  engage <weapon> [--profile fast|preflight|deep] [--note "..."]
+  disarm
+  help
+USAGE
+}
+
+fail_user() {
+  printf 'Error: %s\n' "$1" >&2
+  exit 1
+}
+
+fail_internal() {
+  printf 'Internal error: %s\n' "$1" >&2
+  exit 2
+}
+
+require_profile() {
+  local profile="$1"
+  case "$profile" in
+    fast|preflight|deep)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+command_status() {
+  armory_state_status
+}
+
+command_list() {
+  armory_registry_list
+}
+
+command_engage() {
+  local weapon="${1:-}"
+  shift || true
+
+  if [ -z "$weapon" ]; then
+    fail_user "Weapon name is required."
+  fi
+
+  if ! armory_registry_has "$weapon"; then
+    fail_user "Unknown weapon: $weapon"
+  fi
+
+  local profile="fast"
+  local note=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --profile)
+        shift
+        if [ "$#" -eq 0 ]; then
+          fail_user "--profile requires a value."
+        fi
+        profile="$1"
+        ;;
+      --note)
+        shift
+        if [ "$#" -eq 0 ]; then
+          fail_user "--note requires a value."
+        fi
+        note="$1"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail_user "Unknown option: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if ! require_profile "$profile"; then
+    fail_user "Invalid profile: $profile"
+  fi
+
+  local json active current_weapon current_profile
+  if json="$(armory_state_read 2>/dev/null)"; then
+    active="$(armory_state__parse_value "active" "$json" || printf '%s' "false")"
+    if [ "$active" = "true" ]; then
+      current_weapon="$(armory_state__parse_value "weapon" "$json" || printf '%s' "")"
+      current_profile="$(armory_state__parse_value "profile" "$json" || printf '%s' "")"
+      fail_user "Armory already engaged with $current_weapon (profile: $current_profile). Disarm first."
+    fi
+  fi
+
+  armory_state_engage "$weapon" "$profile" "$note" || fail_internal "Failed to engage weapon."
+  armory_state_status
+}
+
+command_disarm() {
+  armory_state_disarm || fail_internal "Failed to disarm."
+  armory_state_status
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    status)
+      command_status
+      ;;
+    list)
+      command_list
+      ;;
+    engage)
+      shift
+      command_engage "$@"
+      ;;
+    disarm)
+      command_disarm
+      ;;
+    help|-h|--help|"")
+      usage
+      ;;
+    *)
+      fail_user "Unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

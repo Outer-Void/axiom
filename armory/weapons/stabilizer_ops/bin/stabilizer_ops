@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: stabilizer_ops [--help]
+
+Stub weapon entrypoint for v0.1. No operational behavior yet.
+USAGE
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+printf '%s\n' "stabilizer_ops is not implemented in v0.1"
+exit 1

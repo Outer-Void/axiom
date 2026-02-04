@@ -1,0 +1,8 @@
+{
+  "name": "stabilizer_ops",
+  "type": "stabilizer",
+  "intercepts_execution": true,
+  "default_profile": "fast",
+  "profiles": ["fast", "preflight", "deep"],
+  "description": "Persistent debugging state: intercept execution and run analysis pipelines (v0.1 scaffold)"
+}
