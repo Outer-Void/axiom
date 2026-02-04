@@ -11,14 +11,30 @@ axiom_is_termux() {
 }
 
 axiom_is_wsl() {
+  # Method 1: Check kernel release
   local uname_r
   uname_r="$(uname -r 2>/dev/null || true)"
-  if printf '%s' "$uname_r" | grep -qi "microsoft"; then
+  if printf '%s' "$uname_r" | grep -qi "microsoft\|wsl"; then
     return 0
   fi
-  if [ -f /proc/version ] && grep -qi "microsoft" /proc/version; then
+  
+  # Method 2: Check /proc/version
+  if [ -f /proc/version ] && grep -qi "microsoft\|wsl" /proc/version; then
     return 0
   fi
+  
+  # Method 3: Check for WSL specific environment variables (newer WSL2)
+  if [ -n "${WSL_DISTRO_NAME:-}" ] || [ -n "${WSL_INTEROP:-}" ]; then
+    return 0
+  fi
+  
+  # Method 4: Check for Windows executables in PATH
+  if command -v wsl.exe >/dev/null 2>&1 || 
+     command -v wslpath >/dev/null 2>&1 ||
+     command -v cmd.exe >/dev/null 2>&1; then
+    return 0
+  fi
+  
   return 1
 }
 

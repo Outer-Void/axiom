@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # Strip inline comments while respecting quotes.
+# FIXED: Added input length limit to prevent DoS
 axiom_env_strip_inline_comment() {
   local line="$1"
   local out=""
@@ -9,6 +10,13 @@ axiom_env_strip_inline_comment() {
   local in_single=0
   local in_double=0
   local i
+
+  # Safety: Limit input length to prevent DoS
+  local max_len=10000
+  if [ ${#line} -gt $max_len ]; then
+    line="${line:0:$max_len}"
+    axiom_log_warn "Truncated long line in env file (exceeded ${max_len} chars)"
+  fi
 
   for ((i = 0; i < ${#line}; i++)); do
     char="${line:$i:1}"
