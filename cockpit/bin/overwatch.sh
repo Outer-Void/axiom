@@ -360,6 +360,7 @@ import os
 import platform as _platform
 import shlex
 import shutil
+import string
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -475,6 +476,17 @@ def list_dir_entries(cwd: Path) -> Tuple[list, str]:
     files = sorted([p for p in entries if p.is_file()], key=lambda p: p.name.lower())
     return dirs + files, ""
 
+def list_dir_entries_limited(cwd: Path, limit: int = 500) -> Tuple[list, bool, str]:
+    try:
+        entries = list(cwd.iterdir())
+    except Exception as e:
+        return [], False, f"Cannot list directory: {e}"
+    dirs = sorted([p for p in entries if p.is_dir()], key=lambda p: p.name.lower())
+    files = sorted([p for p in entries if p.is_file()], key=lambda p: p.name.lower())
+    combined = dirs + files
+    has_more = len(combined) > limit
+    return combined[:limit], has_more, ""
+
 def truncate_text(text: str, max_len: int) -> str:
     if max_len <= 0:
         return ""
@@ -497,12 +509,19 @@ def shorten_path(path: Path, max_len: int = 28) -> str:
             return compact
     return truncate_text(s, max_len)
 
+from dataclasses import dataclass, field
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
+try:
+    from textual.widgets import Tree
+    TREE_AVAILABLE = True
+except Exception:
+    Tree = None
+    TREE_AVAILABLE = False
 
 # reduce mouse weirdness
 os.environ.setdefault("TEXTUAL_NO_MOUSE", "1")
@@ -515,6 +534,17 @@ PANEL2 = "#191b1f"
 BORDER = "#2b2f34"
 TEXT = "#c7cbd1"
 TEXT_DIM = "#9aa3ad"
+
+@dataclass
+class FileNode:
+    label: str
+    path: Optional[Path]
+    is_dir: bool
+    depth: int = 0
+    expanded: bool = False
+    loaded: bool = False
+    is_placeholder: bool = False
+    children: list["FileNode"] = field(default_factory=list)
 
 class ConfirmScreen(ModalScreen[str]):
     def __init__(self, prompt: str):
@@ -565,10 +595,13 @@ class ObservePane(Static):
 class FilesPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Filesystem Navigator")
-        yield Label("Enter: open dir / preview file | '..' = parent", id="files-hint")
+        yield Label("Enter: expand/collapse | [M] Move | [P] Preview | [R] Refresh", id="files-hint")
         yield Label("CWD:", id="files-cwd")
         yield Input(placeholder="Type a path and press Enter", id="files-path")
-        yield ListView(id="files-list")
+        if TREE_AVAILABLE:
+            yield Tree("Filesystem", id="files-tree")
+        else:
+            yield ListView(id="files-tree")
         yield TextArea(id="files-preview", read_only=True)
 
 class OperatePane(Static):
@@ -606,9 +639,16 @@ class AboutPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("OVERWATCH | AXIOM")
         yield TextArea(
-            "Mission terminal for AXIOM operations.\n"
-            "Left pane: modes. Terminal pane: persistent shell.\n"
-            "Safety: confirmations for destructive commands.\n",
+            "System: AXIOM — Overwatch Cockpit\n"
+            "Developer: Justadudeinspace (JADIS)\n"
+            "Email: theoutervoid@outlook.com\n"
+            "Developer GitHub: https://github.com/Justadudeinspace\n"
+            "Repo: https://github.com/Justadudeinspace/axiom\n"
+            "\n"
+            "Mission: Spaceship-grade terminal cockpit for cross-platform ops (Termux, Debian/WSL, Linux, macOS).\n"
+            "\n"
+            "Keys: Enter expand/collapse or preview | M move CWD | P preview | R refresh\n"
+            "Keys: / search | Tab cycle panes | T toggle terminal (narrow) | Q quit\n",
             read_only=True,
         )
 
@@ -697,6 +737,16 @@ class OverwatchApp(App):
     #files-hint {{
         color: {ACCENT_DIM};
     }}
+    #files-tree {{
+        border: solid {BORDER};
+        height: 1fr;
+    }}
+    #files-preview {{
+        border: solid {BORDER};
+    }}
+    Tree:focus {{
+        border: solid {ACCENT_DIM};
+    }}
     #observe-filter {{
         border: solid {BORDER};
         background: #111214;
@@ -725,6 +775,9 @@ class OverwatchApp(App):
         Binding("/", "search", "Search"),
         Binding("t", "toggle_terminal", "Terminal"),
         Binding("enter", "enter", "Enter"),
+        Binding("m", "move_cwd", "Move"),
+        Binding("p", "preview", "Preview"),
+        Binding("backspace", "collapse_node", "Collapse"),
         Binding("r", "refresh", "Refresh"),
         Binding("?", "help", "Help"),
         Binding("ctrl+c", "cancel", "Cancel"),
@@ -735,15 +788,17 @@ class OverwatchApp(App):
     is_narrow = reactive(False)
     terminal_visible = reactive(True)
     keyboard_visible = reactive(False)
+    cwd = reactive(REPO_ROOT)
 
     def __init__(self):
         super().__init__()
-        self.cwd = REPO_ROOT
         self._running_proc: Optional[asyncio.subprocess.Process] = None
         self._running_task: Optional[asyncio.Task] = None
         self.nav_map = ["Observe", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
         self._observe_filter = ""
         self._locker_desc = {}
+        self._files_fallback_roots: list["FileNode"] = []
+        self._files_fallback_visible: list["FileNode"] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -791,6 +846,7 @@ class OverwatchApp(App):
             "Enter runs in current CWD.",
             "CTRL+C cancels the active command.",
             "Esc returns focus to nav.",
+            "Files: Enter expand/collapse | M move CWD | P preview.",
         ]
         if IS_TERMUX:
             lines.append("k toggles keyboard (Termux).")
@@ -932,23 +988,216 @@ class OverwatchApp(App):
         self.query_one("#observe-output", TextArea).text = "".join(chunks)
 
     def refresh_files(self) -> None:
-        lv = self.query_one("#files-list", ListView)
-        lv.clear()
-        lv.append(NavItem(".. (parent)", tag="__parent__"))
-        entries, err = list_dir_entries(self.cwd)
         preview = self.query_one("#files-preview", TextArea)
-        if err:
-            preview.text = err + "\n"
-            return
-
-        for p in entries:
-            if p.is_dir():
-                lv.append(NavItem(p.name + "/", tag=str(p)))
-        for p in entries:
-            if p.is_file():
-                lv.append(NavItem(p.name, tag=str(p)))
-        lv.index = 0
         preview.text = "Select an entry and press Enter.\n"
+        if TREE_AVAILABLE:
+            tree = self.query_one("#files-tree", Tree)
+            self.build_files_tree(tree)
+        else:
+            self.build_files_tree_fallback()
+
+    def get_files_root_paths(self) -> list[Path]:
+        if os.name == "nt":
+            drives = []
+            for letter in string.ascii_uppercase:
+                drive = Path(f"{letter}:/")
+                if drive.exists():
+                    drives.append(drive)
+            return drives or [Path("/")]
+        return [Path(os.sep)]
+
+    def reset_tree_node(self, node, label: str) -> None:
+        if hasattr(node, "clear"):
+            node.clear()
+        elif hasattr(node, "remove_children"):
+            node.remove_children()
+        else:
+            try:
+                node.children.clear()
+            except Exception:
+                pass
+        if hasattr(node, "set_label"):
+            node.set_label(label)
+        else:
+            node.label = label
+
+    def build_files_tree(self, tree) -> None:
+        root_paths = self.get_files_root_paths()
+        root = tree.root
+        if len(root_paths) == 1:
+            root_path = root_paths[0]
+            self.reset_tree_node(root, str(root_path))
+            root.data = {"path": str(root_path), "is_dir": True, "loaded": False}
+            root.allow_expand = True
+            self.populate_tree_node(root)
+        else:
+            self.reset_tree_node(root, "Computer")
+            root.data = {"path": None, "is_dir": True, "loaded": True}
+            for drive in root_paths:
+                child = root.add(str(drive), data={"path": str(drive), "is_dir": True, "loaded": False})
+                child.allow_expand = True
+        root.expand()
+
+    def populate_tree_node(self, node) -> None:
+        data = node.data or {}
+        if data.get("loaded") or not data.get("is_dir"):
+            return
+        path_str = data.get("path")
+        if not path_str:
+            return
+        path = Path(path_str)
+        entries, has_more, err = list_dir_entries_limited(path)
+        if err:
+            node.add("[permission denied]", data={"path": None, "is_dir": False, "error": err})
+            data["loaded"] = True
+            node.data = data
+            return
+        for entry in entries:
+            if entry.is_dir():
+                child = node.add(f"{entry.name}/", data={"path": str(entry), "is_dir": True, "loaded": False})
+                child.allow_expand = True
+            else:
+                node.add(entry.name, data={"path": str(entry), "is_dir": False})
+        if has_more:
+            node.add("(more...)", data={"path": None, "is_dir": False, "more": True})
+        data["loaded"] = True
+        node.data = data
+
+    def handle_tree_selection(self, node, expand_toggle: bool) -> None:
+        preview = self.query_one("#files-preview", TextArea)
+        data = node.data or {}
+        if data.get("more"):
+            preview.text = "More entries exist in this directory.\n"
+            return
+        path_str = data.get("path")
+        if not path_str:
+            if data.get("error"):
+                preview.text = f"{data.get('error')}\n"
+            return
+        path = Path(path_str)
+        if data.get("is_dir"):
+            if expand_toggle:
+                if node.is_expanded:
+                    node.collapse()
+                else:
+                    self.populate_tree_node(node)
+                    node.expand()
+            preview.text = self.preview_path(path)
+        else:
+            preview.text = self.preview_path(path)
+
+    def build_files_tree_fallback(self) -> None:
+        roots = self.get_files_root_paths()
+        self._files_fallback_roots = []
+        if len(roots) == 1:
+            root_path = roots[0]
+            self._files_fallback_roots.append(
+                FileNode(label=str(root_path), path=root_path, is_dir=True, depth=0)
+            )
+        else:
+            for drive in roots:
+                self._files_fallback_roots.append(
+                    FileNode(label=str(drive), path=drive, is_dir=True, depth=0)
+                )
+        self.rebuild_fallback_visible()
+        self.render_fallback_list()
+
+    def load_fallback_children(self, node: FileNode) -> None:
+        if node.loaded or not node.path or not node.is_dir:
+            return
+        entries, has_more, err = list_dir_entries_limited(node.path)
+        if err:
+            node.children.append(
+                FileNode(label="[permission denied]", path=None, is_dir=False, depth=node.depth + 1, is_placeholder=True)
+            )
+            node.loaded = True
+            return
+        for entry in entries:
+            node.children.append(
+                FileNode(
+                    label=f"{entry.name}/" if entry.is_dir() else entry.name,
+                    path=entry,
+                    is_dir=entry.is_dir(),
+                    depth=node.depth + 1,
+                )
+            )
+        if has_more:
+            node.children.append(
+                FileNode(label="(more...)", path=None, is_dir=False, depth=node.depth + 1, is_placeholder=True)
+            )
+        node.loaded = True
+
+    def rebuild_fallback_visible(self) -> None:
+        visible: list[FileNode] = []
+
+        def walk(nodes: list[FileNode]) -> None:
+            for n in nodes:
+                visible.append(n)
+                if n.is_dir and n.expanded:
+                    walk(n.children)
+
+        walk(self._files_fallback_roots)
+        self._files_fallback_visible = visible
+
+    def format_fallback_label(self, node: FileNode) -> str:
+        indent = "  " * node.depth
+        if node.is_placeholder:
+            return f"{indent}{node.label}"
+        if node.is_dir:
+            marker = "v" if node.expanded else ">"
+            return f"{indent}{marker} {node.label}"
+        return f"{indent}  {node.label}"
+
+    def render_fallback_list(self) -> None:
+        lv = self.query_one("#files-tree", ListView)
+        lv.clear()
+        for node in self._files_fallback_visible:
+            lv.append(NavItem(self.format_fallback_label(node)))
+        if lv.index is None and self._files_fallback_visible:
+            lv.index = 0
+
+    def handle_fallback_selection(self, expand_toggle: bool) -> None:
+        lv = self.query_one("#files-tree", ListView)
+        if lv.index is None or lv.index >= len(self._files_fallback_visible):
+            return
+        node = self._files_fallback_visible[lv.index]
+        preview = self.query_one("#files-preview", TextArea)
+        if node.is_placeholder or node.path is None:
+            if node.label == "(more...)":
+                preview.text = "More entries exist in this directory.\n"
+            else:
+                preview.text = "Unable to access this entry.\n"
+            return
+        if node.is_dir:
+            if expand_toggle:
+                if node.expanded:
+                    node.expanded = False
+                else:
+                    self.load_fallback_children(node)
+                    node.expanded = True
+                self.rebuild_fallback_visible()
+                self.render_fallback_list()
+                lv.index = min(lv.index, len(self._files_fallback_visible) - 1)
+            preview.text = self.preview_path(node.path)
+        else:
+            preview.text = self.preview_path(node.path)
+
+    def get_selected_files_path(self) -> Optional[Path]:
+        if TREE_AVAILABLE:
+            tree = self.query_one("#files-tree", Tree)
+            node = tree.cursor_node
+            if node is None:
+                return None
+            data = node.data or {}
+            path_str = data.get("path")
+            if not path_str:
+                return None
+            return Path(path_str)
+        lv = self.query_one("#files-tree", ListView)
+        if lv.index is None or lv.index >= len(self._files_fallback_visible):
+            return None
+        node = self._files_fallback_visible[lv.index]
+        return node.path
 
     def preview_path(self, p: Path) -> str:
         try:
@@ -965,9 +1214,13 @@ class OverwatchApp(App):
         size = st.st_size
         head = f"FILE: {p}\nModified: {mtime}\nSize: {size} bytes\n\n"
         try:
-            content = p.read_text(errors="ignore")
-            body = content[:6000] + ("\n\n...[truncated]...\n" if len(content) > 6000 else "")
-            return head + body
+            max_bytes = 20000
+            data = p.read_bytes()[:max_bytes]
+            if b"\x00" in data:
+                return head + "(binary file preview skipped)\n"
+            content = data.decode(errors="ignore")
+            suffix = "\n\n...[truncated]...\n" if size > max_bytes else ""
+            return head + content + suffix
         except Exception as e:
             return head + f"(unable to read file: {e})\n"
 
@@ -1023,15 +1276,8 @@ class OverwatchApp(App):
                 self.update_cwd_labels()
         elif event.list_view.id == "observe-list":
             self.open_selected_run()
-        elif event.list_view.id == "files-list":
-            item = event.item
-            if not isinstance(item, NavItem):
-                return
-            prev = self.query_one("#files-preview", TextArea)
-            if item.tag == "__parent__":
-                prev.text = f"Go to parent of {self.cwd}\n"
-            else:
-                prev.text = self.preview_path(Path(item.tag))
+        elif event.list_view.id == "files-tree" and not TREE_AVAILABLE:
+            self.handle_fallback_selection(expand_toggle=True)
         elif event.list_view.id == "operate-list":
             item = event.item
             if not isinstance(item, NavItem) or item.tag == "__empty__":
@@ -1057,7 +1303,7 @@ class OverwatchApp(App):
                 self.cwd = p
                 self.update_cwd_labels()
                 self.refresh_files()
-                self.query_one("#files-list", ListView).focus()
+                self.query_one("#files-tree").focus()
             else:
                 self.query_one("#files-preview", TextArea).text = f"Invalid directory: {raw}\n"
         elif event.input.id == "term-cmd":
@@ -1089,7 +1335,7 @@ class OverwatchApp(App):
 
     async def action_enter(self) -> None:
         focused = self.focused
-        if self.mode == "Files" and isinstance(focused, ListView) and focused.id == "files-list":
+        if self.mode == "Files" and focused is not None and focused.id == "files-tree":
             await self.files_enter()
         elif self.mode == "Operate" and isinstance(focused, ListView) and focused.id == "operate-list":
             await self.operate_enter()
@@ -1097,34 +1343,14 @@ class OverwatchApp(App):
             self.open_selected_run()
 
     async def files_enter(self) -> None:
-        lv = self.query_one("#files-list", ListView)
-        if lv.index is None:
-            return
-        item = lv.get_item_at(lv.index)
-        if not isinstance(item, NavItem):
-            return
-        prev = self.query_one("#files-preview", TextArea)
-        if item.tag == "__parent__":
-            parent = self.cwd.parent if self.cwd.parent != self.cwd else self.cwd
-            try:
-                _ = list(parent.iterdir())
-                self.cwd = parent
-                self.update_cwd_labels()
-                self.refresh_files()
-            except Exception as e:
-                prev.text = f"Cannot enter parent: {e}\n"
-            return
-        p = Path(item.tag)
-        if p.is_dir():
-            try:
-                _ = list(p.iterdir())
-                self.cwd = p
-                self.update_cwd_labels()
-                self.refresh_files()
-            except Exception as e:
-                prev.text = f"Cannot enter directory: {e}\n"
+        if TREE_AVAILABLE:
+            tree = self.query_one("#files-tree", Tree)
+            node = tree.cursor_node
+            if node is None:
+                return
+            self.handle_tree_selection(node, expand_toggle=True)
         else:
-            prev.text = self.preview_path(p)
+            self.handle_fallback_selection(expand_toggle=True)
 
     async def operate_enter(self) -> None:
         lv = self.query_one("#operate-list", ListView)
@@ -1214,6 +1440,71 @@ class OverwatchApp(App):
                 self.refresh_observe()
 
         self._running_task = asyncio.create_task(runner())
+
+    def on_tree_node_selected(self, event) -> None:
+        if not TREE_AVAILABLE:
+            return
+        tree = event.tree
+        if tree.id != "files-tree":
+            return
+        self.handle_tree_selection(event.node, expand_toggle=True)
+
+    def on_tree_node_expanded(self, event) -> None:
+        if not TREE_AVAILABLE:
+            return
+        tree = event.tree
+        if tree.id != "files-tree":
+            return
+        self.populate_tree_node(event.node)
+
+    def action_preview(self) -> None:
+        if self.mode != "Files":
+            return
+        if TREE_AVAILABLE:
+            tree = self.query_one("#files-tree", Tree)
+            node = tree.cursor_node
+            if node is None:
+                return
+            self.handle_tree_selection(node, expand_toggle=False)
+        else:
+            self.handle_fallback_selection(expand_toggle=False)
+
+    def action_collapse_node(self) -> None:
+        if self.mode != "Files":
+            return
+        if not TREE_AVAILABLE:
+            lv = self.query_one("#files-tree", ListView)
+            if lv.index is None or lv.index >= len(self._files_fallback_visible):
+                return
+            node = self._files_fallback_visible[lv.index]
+            if node.is_dir and node.expanded:
+                node.expanded = False
+                self.rebuild_fallback_visible()
+                self.render_fallback_list()
+            return
+        tree = self.query_one("#files-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        if node.is_expanded:
+            node.collapse()
+        elif node.parent is not None:
+            node.parent.collapse()
+
+    def action_move_cwd(self) -> None:
+        if self.mode != "Files":
+            return
+        target = self.get_selected_files_path()
+        if target is None:
+            self.query_one("#files-hint", Label).update("No directory selected for MOVE.")
+            return
+        if not target.is_dir():
+            self.query_one("#files-hint", Label).update("MOVE requires a directory selection.")
+            return
+        self.cwd = target
+        self.update_cwd_labels()
+        self.query_one("#files-hint", Label).update(f"CWD set to {self.cwd}")
+        self.query_one("#files-preview", TextArea).text = f"CWD set to {self.cwd}\n"
 
     async def action_cancel(self) -> None:
         if self._running_proc and self._running_task and not self._running_task.done():
