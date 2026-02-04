@@ -14,59 +14,38 @@ set -euo pipefail
 #   Resize terminal to <120 columns (or use a narrow Termux session) to trigger narrow mode.
 #   Keybinds: q quit, t toggle terminal (narrow mode), / search, tab cycle panes.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-COCKPIT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-REPO_ROOT="$(cd "${COCKPIT_DIR}/.." && pwd -P)"
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+COCKPIT_DIR="$(cd -P -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
+CORE_DIR="${COCKPIT_DIR}/core"
 OVERWATCH_ACTIVE=0
 
-detect_platform() {
-  local platform="unknown"
+# Source cockpit/core in required order.
+# shellcheck source=/dev/null
+. "${CORE_DIR}/constants.sh"
+# shellcheck source=/dev/null
+. "${CORE_DIR}/shell.sh"
+# shellcheck source=/dev/null
+. "${CORE_DIR}/log.sh"
+# shellcheck source=/dev/null
+. "${CORE_DIR}/platform.sh"
+# shellcheck source=/dev/null
+. "${CORE_DIR}/env.sh"
+# shellcheck source=/dev/null
+. "${CORE_DIR}/runs.sh"
 
-  # Termux detection
-  if [ -n "${TERMUX_VERSION-}" ] || [ -d "/data/data/com.termux" ] || [[ "${PREFIX-}" == *com.termux* ]] || [[ "$(uname -o 2>/dev/null || true)" == "Android" ]]; then
-    platform="termux"
-  # WSL2 detection
-  elif [ -r /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
-    platform="wsl2"
-  # macOS detection
-  elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]]; then
-    platform="macos"
-  # Linux detection
-  elif [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
-    platform="linux"
-  # Windows (Git Bash, Cygwin, MSYS)
-  elif [[ "$(uname -s 2>/dev/null || true)" == "MINGW"* ]] || [[ "$(uname -s 2>/dev/null || true)" == "CYGWIN"* ]] || [[ "$(uname -s 2>/dev/null || true)" == "MSYS"* ]]; then
-    platform="windows"
-  fi
-
-  echo "$platform"
-}
-
-PLATFORM="$(detect_platform)"
-
-# Normalize with realpath if available
-if command -v realpath >/dev/null 2>&1; then
-  SCRIPT_DIR="$(realpath "${SCRIPT_DIR}")"
-  COCKPIT_DIR="$(realpath "${COCKPIT_DIR}")"
-  REPO_ROOT="$(realpath "${REPO_ROOT}")"
-elif command -v greadlink >/dev/null 2>&1; then
-  SCRIPT_DIR="$(greadlink -f "${SCRIPT_DIR}" 2>/dev/null || echo "${SCRIPT_DIR}")"
-  COCKPIT_DIR="$(greadlink -f "${COCKPIT_DIR}" 2>/dev/null || echo "${COCKPIT_DIR}")"
-  REPO_ROOT="$(greadlink -f "${REPO_ROOT}" 2>/dev/null || echo "${REPO_ROOT}")"
-fi
-
-RUNS_DIR="${COCKPIT_DIR}/runs"
-CONFIG_DIR="${COCKPIT_DIR}/config"
+SCRIPT_DIR="$(axiom_script_dir)"
+COCKPIT_DIR="$(axiom_cockpit_dir)"
+REPO_ROOT="$(axiom_repo_root)"
+RUNS_DIR="$(axiom_runs_dir)"
+CONFIG_DIR="$(axiom_config_dir)"
+LOCKER_DIR="$(axiom_locker_dir)"
 ENV_FILE="${CONFIG_DIR}/.env"
-LOCKER_DIR="${REPO_ROOT}/locker"
 
-# Optional platform-specific env override
-PLATFORM_CONFIG="${CONFIG_DIR}/.env.${PLATFORM}"
-if [ -f "${PLATFORM_CONFIG}" ]; then
-  ENV_FILE="${PLATFORM_CONFIG}"
-fi
+PLATFORM="$(axiom_detect_platform)"
 
 mkdir -p "${RUNS_DIR}" "${CONFIG_DIR}" 2>/dev/null || true
+axiom_ensure_env_file "${ENV_FILE}" "${CONFIG_DIR}/.env.example"
+axiom_load_env_file "${ENV_FILE}"
 
 # Platform-specific python command default
 PYTHON_CMD="python3"
@@ -100,7 +79,7 @@ check_python() {
     case "$PLATFORM" in
       termux) echo "Install with: pkg install python3" >&2 ;;
       macos)  echo "Install with: brew install python3" >&2 ;;
-      linux|wsl2) echo "Install with: sudo apt install python3" >&2 ;;
+      linux|wsl|wsl2) echo "Install with: sudo apt install python3" >&2 ;;
       windows) echo "Install from: https://www.python.org/downloads/windows/" >&2 ;;
       *) echo "Install Python 3 and ensure it is in PATH." >&2 ;;
     esac
@@ -128,28 +107,13 @@ write_run_metadata() {
   local exit_code="$6"
   local started="$7"
   local ended="$8"
-  cat > "${run_dir}/metadata.json" <<META
-{
-  "mode": "${mode}",
-  "action": "${action}",
-  "command": "${command}",
-  "exit_code": ${exit_code},
-  "platform": "${PLATFORM}",
-  "cwd": "${cwd}",
-  "started_at": "${started}",
-  "ended_at": "${ended}"
-}
-META
+  axiom_runs_write_metadata "${run_dir}" "${mode}" "${action}" "${command}" "${exit_code}" "${started}" "${ended}" "${cwd}"
 }
 
 make_run_dir() {
   local mode="$1"
   local action="$2"
-  local ts
-  ts="$(date +%Y%m%d_%H%M%S)"
-  local run_dir="${RUNS_DIR}/${ts}_${mode}_${action}"
-  mkdir -p "${run_dir}"
-  echo "${run_dir}"
+  axiom_runs_create_dir "${mode}" "${action}"
 }
 
 self_test() {
@@ -357,7 +321,6 @@ run_python_app() {
 import asyncio
 import json
 import os
-import platform as _platform
 import shlex
 import shutil
 import string
@@ -378,6 +341,7 @@ CONFIG_DIR = Path("${CONFIG_DIR}").resolve()
 ENV_FILE = Path("${ENV_FILE}").resolve()
 LOCKER_DIR = Path("${LOCKER_DIR}").resolve()
 AI_LOG_PATH = RUNS_DIR / "ai_output.log"
+AI_SCRIPT = COCKPIT_DIR / "bin" / "gpt-4o-mini.sh"
 
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -455,8 +419,6 @@ def write_metadata(run_dir: Path, mode: str, action: str, command: str, cwd: Pat
         "command": command,
         "exit_code": int(exit_code),
         "platform": CURRENT_PLATFORM,
-        "os": _platform.system(),
-        "arch": _platform.machine(),
         "cwd": str(cwd),
         "started_at": started,
         "ended_at": ended,
@@ -668,7 +630,14 @@ class RunsPane(Static):
 class FilesPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Filesystem Navigator")
-        yield Label("Enter: expand/collapse | [M] Move | [P] Preview | [R] Refresh", id="files-hint")
+        yield Label("Enter: expand/collapse | [M] Move | [P] Preview | [R] Refresh | Jump buttons set CWD", id="files-hint")
+        with Horizontal(id="files-actions"):
+            yield Button("MOVE", id="files-move")
+            yield Button("Repo", id="files-jump-repo")
+            yield Button("Cockpit", id="files-jump-cockpit")
+            yield Button("Locker", id="files-jump-locker")
+            yield Button("Home", id="files-jump-home")
+            yield Button("Refresh", id="files-refresh")
         yield Label("CWD:", id="files-cwd")
         yield Input(placeholder="Type a path and press Enter", id="files-path")
         if TREE_AVAILABLE:
@@ -724,10 +693,19 @@ class AboutPane(Static):
             "Developer GitHub: https://github.com/Justadudeinspace\n"
             "Repo: https://github.com/Justadudeinspace/axiom\n"
             "\n"
-            "Mission: Spaceship-grade terminal cockpit for cross-platform ops (Termux, Debian/WSL, Linux, macOS).\n"
+            "Overview:\n"
+            "- Overwatch is AXIOM's ship-cockpit TUI for live ops, flight recording, and AI-assisted triage.\n"
+            "- Designed for Termux + desktop shells, with a shared CWD across Files, Operate, and Terminal panes.\n"
+            "- Every action emits a run log with metadata for forensic replay.\n"
             "\n"
-            "Keys: Enter expand/collapse or preview | M move CWD | P preview | R refresh\n"
-            "Keys: / search | Tab cycle panes | T tail in Runs (terminal toggle in other modes) | Q quit\n",
+            "Navigation:\n"
+            "- Files: Enter expand/collapse | M move CWD | P preview (large files prompt) | R refresh.\n"
+            "- Runs: T toggles tail mode; output/metadata are selectable per run.\n"
+            "- Terminal: Enter executes in CWD; destructive commands require confirmation.\n"
+            "\n"
+            "AI Sidecar:\n"
+            "- Always-on AI window shows only AI output with full logging to cockpit/runs/ai_output.log.\n"
+            "- Quick actions: Summarize Run, Explain Error, Review File, Suggest Fix.\n",
             read_only=True,
         )
 
@@ -751,7 +729,7 @@ class OverwatchApp(App):
         background: #1b1d20;
         color: {TEXT};
         padding: 1 2;
-        border: solid {BORDER};
+        border: solid {ACCENT_DIM};
         overflow-x: hidden;
     }}
     #ai-bar {{
@@ -810,6 +788,9 @@ class OverwatchApp(App):
     #left.narrow {{
         min-width: 20;
     }}
+    #left.narrow #nav {{
+        height: 7;
+    }}
     #right.narrow {{
         width: 1fr;
         height: 12;
@@ -845,6 +826,21 @@ class OverwatchApp(App):
     }}
     #files-hint {{
         color: {ACCENT_DIM};
+    }}
+    #files-actions {{
+        height: 3;
+    }}
+    #files-actions Button {{
+        background: {PANEL2};
+        color: {TEXT};
+        border: solid {ACCENT_DIM};
+        margin: 0 1 0 0;
+        height: 1;
+        padding: 0 1;
+    }}
+    #files-actions Button:hover {{
+        border: solid {ACCENT};
+        color: {ACCENT};
     }}
     #files-tree {{
         border: solid {BORDER};
@@ -983,21 +979,24 @@ class OverwatchApp(App):
         self._runs_tail_enabled = False
         self._files_fallback_roots: list["FileNode"] = []
         self._files_fallback_visible: list["FileNode"] = []
+        self._files_allow_large: set[str] = set()
+        self._files_preview_limit = int(os.environ.get("OVERWATCH_FILE_PREVIEW_LIMIT", 10 * 1024 * 1024))
         self._ai_buffer = ""
         self._ai_log_path = AI_LOG_PATH
         self._ai_max_chars = 4000
         self._ai_unavailable_emitted = False
         self._ai_model = ""
         self._ai_base_url = "https://api.openai.com/v1"
+        self._ai_preflight_done = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield StatusHeader(id="header")
             with Horizontal(id="ai-bar"):
-                yield Button("Ping", id="ai-action-ping")
-                yield Button("Summarize", id="ai-action-summarize")
+                yield Button("Summarize Run", id="ai-action-summarize-run")
                 yield Button("Explain Error", id="ai-action-explain")
-                yield Button("Next Steps", id="ai-action-next")
+                yield Button("Review File", id="ai-action-review")
+                yield Button("Suggest Fix", id="ai-action-suggest")
             yield TextArea(id="ai-window", read_only=True)
             with Container(id="body"):
                 with Vertical(id="left"):
@@ -1180,11 +1179,6 @@ class OverwatchApp(App):
         self.update_ai_status()
 
     def _lv_item_at(self, lv: ListView, index: int):
-        if hasattr(lv, "get_item_at"):
-            try:
-                return lv.get_item_at(index)
-            except Exception:
-                pass
         try:
             children = list(lv.children)
             if 0 <= index < len(children):
@@ -1229,7 +1223,8 @@ class OverwatchApp(App):
         prev_selected = self._runs_selected_name if preserve_selection else None
         entries = [p for p in RUNS_DIR.iterdir()] if RUNS_DIR.exists() else []
         dirs = sorted([p for p in entries if p.is_dir()], key=lambda p: p.name, reverse=True)
-        files = sorted([p for p in entries if p.is_file()], key=lambda p: p.name.lower())
+        allowed_files = {"README.md", "ai_output.log"}
+        files = sorted([p for p in entries if p.is_file() and p.name in allowed_files], key=lambda p: p.name.lower())
         combined = dirs + files
         if self._runs_filter:
             combined = [p for p in combined if self._runs_filter in p.name.lower()]
@@ -1306,7 +1301,11 @@ class OverwatchApp(App):
         for entry in files:
             files_lv.append(NavItem(entry.name, tag=str(entry)))
         new_index = 0
-        preferred = prev_selected or ("output.log" if (run_dir / "output.log").exists() else None)
+        preferred = prev_selected
+        if not preferred and (run_dir / "output.log").exists():
+            preferred = "output.log"
+        if not preferred and (run_dir / "metadata.json").exists():
+            preferred = "metadata.json"
         if preferred:
             for idx, item in enumerate(files_lv.children):
                 if isinstance(item, NavItem) and Path(item.tag).name == preferred:
@@ -1335,8 +1334,15 @@ class OverwatchApp(App):
             files_lv = self.query_one("#runs-files", ListView)
             file_item = self._lv_selected_item(files_lv)
             if file_item is None:
-                viewer.text = "Select a file from this run.\n"
-                return
+                preferred = "output.log" if (path / "output.log").exists() else "metadata.json"
+                for idx, item in enumerate(files_lv.children):
+                    if isinstance(item, NavItem) and Path(item.tag).name == preferred:
+                        files_lv.index = idx
+                        file_item = item
+                        break
+                if file_item is None:
+                    viewer.text = "Select a file from this run.\n"
+                    return
             if not isinstance(file_item, NavItem) or file_item.tag == "__empty__":
                 viewer.text = "No run file selected.\n"
                 return
@@ -1589,6 +1595,17 @@ class OverwatchApp(App):
         node = self._files_fallback_visible[lv.index]
         return node.path
 
+    def file_needs_confirm(self, p: Path) -> bool:
+        if not p.exists() or p.is_dir():
+            return False
+        try:
+            size = p.stat().st_size
+        except Exception:
+            return False
+        if size <= self._files_preview_limit:
+            return False
+        return str(p) not in self._files_allow_large
+
     def preview_path(self, p: Path) -> str:
         try:
             st = p.stat()
@@ -1603,6 +1620,14 @@ class OverwatchApp(App):
             return f"DIR: {p}\nModified: {mtime}\nItems: {count}\n"
         size = st.st_size
         head = f"FILE: {p}\nModified: {mtime}\nSize: {size} bytes\n\n"
+        if size > self._files_preview_limit and str(p) not in self._files_allow_large:
+            limit_mb = self._files_preview_limit / (1024 * 1024)
+            size_mb = size / (1024 * 1024)
+            return (
+                f"{head}"
+                f"(preview blocked: {size_mb:.2f} MB > {limit_mb:.2f} MB limit)\n"
+                "Press [P] to request an 'Open anyway' confirmation.\n"
+            )
         try:
             max_bytes = 20000
             data = p.read_bytes()[:max_bytes]
@@ -1681,14 +1706,26 @@ class OverwatchApp(App):
         self.ai_emit(action, err, status="error")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "ai-action-ping":
-            asyncio.create_task(self.run_ai_ping())
-        elif event.button.id == "ai-action-summarize":
-            asyncio.create_task(self.run_ai_action("summarize"))
+        if event.button.id == "ai-action-summarize-run":
+            asyncio.create_task(self.run_ai_action("summarize_run"))
         elif event.button.id == "ai-action-explain":
             asyncio.create_task(self.run_ai_action("explain_error"))
-        elif event.button.id == "ai-action-next":
-            asyncio.create_task(self.run_ai_action("next_steps"))
+        elif event.button.id == "ai-action-review":
+            asyncio.create_task(self.run_ai_action("review_file"))
+        elif event.button.id == "ai-action-suggest":
+            asyncio.create_task(self.run_ai_action("suggest_fix"))
+        elif event.button.id == "files-move":
+            self.action_move_cwd()
+        elif event.button.id == "files-jump-repo":
+            self.jump_to_path(REPO_ROOT)
+        elif event.button.id == "files-jump-cockpit":
+            self.jump_to_path(COCKPIT_DIR)
+        elif event.button.id == "files-jump-locker":
+            self.jump_to_path(LOCKER_DIR)
+        elif event.button.id == "files-jump-home":
+            self.jump_to_path(Path.home())
+        elif event.button.id == "files-refresh":
+            self.refresh_files()
 
     def _read_text_limited(self, path: Path, max_chars: int = 8000) -> str:
         if not path.exists():
@@ -1761,6 +1798,29 @@ class OverwatchApp(App):
             return "", "No cleanup text available."
         return "", f"No context for mode {self.mode}."
 
+    async def run_ai_preflight(self, model: str) -> None:
+        if self._ai_preflight_done:
+            return
+        if not AI_SCRIPT.exists():
+            self.ai_error("ai_preflight", f"AI helper missing: {AI_SCRIPT}")
+            self._ai_preflight_done = True
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(AI_SCRIPT),
+                "--test",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            output = (stdout or b"") + (stderr or b"")
+            text = output.decode(errors="ignore").strip()
+            if text:
+                self.ai_emit("ai_preflight", text, status="info", model=model)
+        except Exception as e:
+            self.ai_error("ai_preflight", f"AI preflight failed: {e}")
+        self._ai_preflight_done = True
+
     async def run_ai_action(self, action: str) -> None:
         env = merge_env_file(ENV_FILE)
         key = env.get("OPENAI_API_KEY", "").strip()
@@ -1772,18 +1832,21 @@ class OverwatchApp(App):
             return
         self._ai_model = model
         self._ai_base_url = base_url.rstrip("/")
+        await self.run_ai_preflight(model)
 
         context, context_desc = self._build_ai_context()
         if not context:
             self.ai_emit(action, context_desc, status="info", model=model)
             return
 
-        if action == "summarize":
-            prompt = "Summarize the following context with key points and any notable issues."
+        if action == "summarize_run":
+            prompt = "Summarize this run with key events, outputs, and any notable issues."
         elif action == "explain_error":
             prompt = "Explain the error(s) or failures in the following context and likely causes."
-        elif action == "next_steps":
-            prompt = "Provide the next steps or recommended actions based on the following context."
+        elif action == "review_file":
+            prompt = "Review the following file. Highlight risks, bugs, or improvements."
+        elif action == "suggest_fix":
+            prompt = "Suggest fixes and next steps based on the following context."
         else:
             prompt = "Review the following context."
 
@@ -1828,7 +1891,7 @@ class OverwatchApp(App):
                 out_path.write_text(response_text, encoding="utf-8", errors="ignore")
             except Exception:
                 pass
-            write_metadata(run_dir, "ai", action, "openai.responses", self.cwd, exit_code, started, now_utc())
+            write_metadata(run_dir, "ai", action, "gpt-4o-mini.sh", self.cwd, exit_code, started, now_utc())
 
     async def action_ai_ping(self) -> None:
         asyncio.create_task(self.run_ai_ping())
@@ -1845,6 +1908,7 @@ class OverwatchApp(App):
             return
         self._ai_model = model
         self._ai_base_url = base_url.rstrip("/")
+        await self.run_ai_preflight(model)
         self.ai_emit(action, "Requesting analysis...", status="info", model=model)
 
         run_dir = make_run_dir("ai", "ping")
@@ -1883,7 +1947,7 @@ class OverwatchApp(App):
                 out_path.write_text(response_text, encoding="utf-8", errors="ignore")
             except Exception:
                 pass
-            write_metadata(run_dir, "ai", "ping", "openai.responses", self.cwd, exit_code, started, now_utc())
+            write_metadata(run_dir, "ai", "ping", "gpt-4o-mini.sh", self.cwd, exit_code, started, now_utc())
 
     def update_operate_tool_info(self, tool: Optional[Path]) -> None:
         preview = self.query_one("#operate-preview", TextArea)
@@ -1971,12 +2035,16 @@ class OverwatchApp(App):
 
     def on_descendant_focus(self, event) -> None:
         control = getattr(event, "control", None)
-        if getattr(control, "id", None) == "term-cmd":
+        if isinstance(control, Input):
+            self.set_keyboard_visible(True)
+        elif isinstance(control, TextArea) and not getattr(control, "read_only", False):
             self.set_keyboard_visible(True)
 
     def on_descendant_blur(self, event) -> None:
         control = getattr(event, "control", None)
-        if getattr(control, "id", None) == "term-cmd":
+        if isinstance(control, Input):
+            self.set_keyboard_visible(False)
+        elif isinstance(control, TextArea) and not getattr(control, "read_only", False):
             self.set_keyboard_visible(False)
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -2092,6 +2160,7 @@ class OverwatchApp(App):
                 self._running_proc = None
                 self._running_task = None
                 self.refresh_observe()
+                self.refresh_runs(preserve_selection=True)
 
         self._running_task = asyncio.create_task(runner())
 
@@ -2124,6 +2193,17 @@ class OverwatchApp(App):
 
     def action_preview(self) -> None:
         if self.mode != "Files":
+            return
+        path = self.get_selected_files_path()
+        if path and self.file_needs_confirm(path):
+            async def confirm_large() -> None:
+                confirm = await self.push_screen(
+                    ConfirmScreen(f"File exceeds {self._files_preview_limit // (1024 * 1024)}MB preview limit:\n{path}\nType yes to open anyway:")
+                )
+                if confirm == "yes":
+                    self._files_allow_large.add(str(path))
+                    self.query_one("#files-preview", TextArea).text = self.preview_path(path)
+            asyncio.create_task(confirm_large())
             return
         if TREE_AVAILABLE:
             tree = self.query_one("#files-tree", Tree)
@@ -2170,6 +2250,19 @@ class OverwatchApp(App):
         self.update_cwd_labels()
         self.query_one("#files-hint", Label).update(f"CWD set to {self.cwd}")
         self.query_one("#files-preview", TextArea).text = f"CWD set to {self.cwd}\n"
+
+    def jump_to_path(self, target: Path) -> None:
+        if not target.exists() or not target.is_dir():
+            self.query_one("#files-hint", Label).update(f"Jump target missing: {target}")
+            return
+        self.cwd = target
+        self.update_cwd_labels()
+        self.refresh_files()
+        self.query_one("#files-preview", TextArea).text = f"Jumped to {self.cwd}\n"
+        try:
+            self.query_one("#files-tree").focus()
+        except Exception:
+            pass
 
     async def action_cancel(self) -> None:
         if self._running_proc and self._running_task and not self._running_task.done():
