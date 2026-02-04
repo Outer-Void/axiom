@@ -4,7 +4,7 @@ set -euo pipefail
 # -------------------------------
 # Overwatch: Sentinel / Night Ops
 # Self-contained cross-platform TUI cockpit
-# - Left: modes (Observe / Files / Operate / Cleanup / Config / About)
+# - Left: modes (Observe / Files / Operate / Terminal / Signal / Config / About)
 # - Right: persistent terminal pane (always visible)
 # - Global cwd shared across Files/Operate/Terminal
 # - Runs logging: runs/<ts>_<mode>_<action>/{output.log,metadata.json}
@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 COCKPIT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 REPO_ROOT="$(cd "${COCKPIT_DIR}/.." && pwd -P)"
+OVERWATCH_ACTIVE=0
 
 detect_platform() {
   local platform="unknown"
@@ -81,8 +82,10 @@ restore_terminal() {
 }
 
 cleanup() {
-  restore_terminal
-  jobs -p | xargs kill -9 2>/dev/null || true
+  if [ "${OVERWATCH_ACTIVE}" -eq 1 ]; then
+    restore_terminal
+    jobs -p | xargs kill -9 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -101,37 +104,210 @@ check_python() {
   fi
 }
 
+usage() {
+  cat <<'USAGE'
+Overwatch: Sentinel / Night Ops
+Usage: overwatch.sh [--help] [--self-test]
+
+Options:
+  --help       Show this help message.
+  --self-test  Print environment info, ensure runs dir exists, list locker tools.
+USAGE
+}
+
+write_run_metadata() {
+  local run_dir="$1"
+  local mode="$2"
+  local action="$3"
+  local command="$4"
+  local cwd="$5"
+  local exit_code="$6"
+  local started="$7"
+  local ended="$8"
+  cat > "${run_dir}/metadata.json" <<META
+{
+  "mode": "${mode}",
+  "action": "${action}",
+  "command": "${command}",
+  "exit_code": ${exit_code},
+  "platform": "${PLATFORM}",
+  "cwd": "${cwd}",
+  "started_at": "${started}",
+  "ended_at": "${ended}"
+}
+META
+}
+
+make_run_dir() {
+  local mode="$1"
+  local action="$2"
+  local ts
+  ts="$(date +%Y%m%d_%H%M%S)"
+  local run_dir="${RUNS_DIR}/${ts}_${mode}_${action}"
+  mkdir -p "${run_dir}"
+  echo "${run_dir}"
+}
+
+self_test() {
+  echo "Overwatch self-test"
+  echo "Platform: ${PLATFORM}"
+  echo "Script: ${SCRIPT_DIR}"
+  echo "Cockpit: ${COCKPIT_DIR}"
+  echo "Repo: ${REPO_ROOT}"
+  echo "Runs: ${RUNS_DIR}"
+  echo "Config: ${ENV_FILE}"
+  mkdir -p "${RUNS_DIR}"
+  echo "Locker tools:"
+  if [ -d "${LOCKER_DIR}" ]; then
+    ls -1 "${LOCKER_DIR}"/*.sh 2>/dev/null | sed 's#.*/##' || echo "  (none)"
+  else
+    echo "  (locker dir missing)"
+  fi
+  echo "Python: ${PYTHON_CMD}"
+}
+
 run_fallback_mode() {
   echo "Textual not available. Running fallback mode."
   echo "Platform: ${PLATFORM}"
   echo "Tip: install Textual with: ${PYTHON_CMD} -m pip install textual"
   echo ""
 
+  local cwd="${REPO_ROOT}"
+
+  show_config_status() {
+    local env_path="${ENV_FILE}"
+    local display_path="${env_path}"
+    if [ ! -f "${env_path}" ] && [ -f "${CONFIG_DIR}/.env.example" ]; then
+      display_path="${CONFIG_DIR}/.env.example"
+    fi
+    echo "Config file: ${display_path}"
+    if [ -f "${display_path}" ]; then
+      if grep -q '^OPENAI_API_KEY=' "${display_path}" 2>/dev/null; then
+        echo "OPENAI_API_KEY: set"
+      else
+        echo "OPENAI_API_KEY: not set"
+      fi
+      if grep -q '^OPENAI_MODEL=' "${display_path}" 2>/dev/null; then
+        echo "OPENAI_MODEL: set"
+      else
+        echo "OPENAI_MODEL: not set"
+      fi
+    else
+      echo "No config file found."
+    fi
+  }
+
+  list_runs() {
+    ls -1t "${RUNS_DIR}" 2>/dev/null | head -n 50 || echo "No runs yet."
+  }
+
+  view_run() {
+    printf "Run name> "
+    read -r run_name
+    [ -z "${run_name}" ] && return
+    local run_dir="${RUNS_DIR}/${run_name}"
+    if [ ! -d "${run_dir}" ]; then
+      echo "Run not found: ${run_name}"
+      return
+    fi
+    [ -f "${run_dir}/metadata.json" ] && cat "${run_dir}/metadata.json"
+    echo "---- output ----"
+    [ -f "${run_dir}/output.log" ] && tail -n 200 "${run_dir}/output.log" || echo "No output.log"
+  }
+
+  run_command_logged() {
+    local cmd="$1"
+    local run_dir
+    run_dir="$(make_run_dir "terminal" "shell")"
+    local out="${run_dir}/output.log"
+    local started
+    started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    set +e
+    (cd "${cwd}" && bash -lc "${cmd}") >"${out}" 2>&1
+    local exit_code=$?
+    set -e
+    local ended
+    ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_run_metadata "${run_dir}" "terminal" "shell" "${cmd}" "${cwd}" "${exit_code}" "${started}" "${ended}"
+    tail -n 200 "${out}"
+  }
+
+  run_tool_logged() {
+    local tool="$1"
+    local args="$2"
+    local run_dir
+    run_dir="$(make_run_dir "operate" "${tool%.*}")"
+    local out="${run_dir}/output.log"
+    local started
+    started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    set +e
+    (cd "${cwd}" && bash -lc "${LOCKER_DIR}/${tool} ${args}") >"${out}" 2>&1
+    local exit_code=$?
+    set -e
+    local ended
+    ended="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_run_metadata "${run_dir}" "operate" "${tool%.*}" "${LOCKER_DIR}/${tool} ${args}" "${cwd}" "${exit_code}" "${started}" "${ended}"
+    tail -n 200 "${out}"
+  }
+
   while true; do
     echo ""
     echo "OVERWATCH (Fallback)"
+    echo "CWD: ${cwd}"
     echo "1) List runs"
-    echo "2) List locker tools"
-    echo "3) Run command in repo root"
+    echo "2) View run details"
+    echo "3) List locker tools"
+    echo "4) Run locker tool"
+    echo "5) Run shell command"
+    echo "6) Set current directory"
+    echo "7) Config status"
     echo "q) Quit"
     printf "> "
     read -r sel
     case "${sel:-}" in
       1)
-        ls -1t "${RUNS_DIR}" 2>/dev/null | head -n 30 || echo "No runs yet."
+        list_runs
         ;;
       2)
+        view_run
+        ;;
+      3)
         if [ -d "${LOCKER_DIR}" ]; then
           ls -1 "${LOCKER_DIR}"/*.sh 2>/dev/null | sed 's#.*/##' || echo "No tools."
         else
           echo "No locker directory at ${LOCKER_DIR}"
         fi
         ;;
-      3)
+      4)
+        printf "tool> "
+        read -r tool
+        [ -z "${tool}" ] && continue
+        if [ ! -f "${LOCKER_DIR}/${tool}" ]; then
+          echo "Tool not found: ${tool}"
+          continue
+        fi
+        printf "args> "
+        read -r args
+        run_tool_logged "${tool}" "${args}"
+        ;;
+      5)
         printf "cmd> "
         read -r cmd
         [ -z "${cmd}" ] && continue
-        (cd "${REPO_ROOT}" && bash -lc "${cmd}")
+        run_command_logged "${cmd}"
+        ;;
+      6)
+        printf "path> "
+        read -r path
+        [ -z "${path}" ] && continue
+        if [ -d "${path}" ]; then
+          cwd="$(cd "${path}" && pwd -P)"
+        else
+          echo "Not a directory: ${path}"
+        fi
+        ;;
+      7)
+        show_config_status
         ;;
       q|Q) exit 0 ;;
       *) echo "Unknown selection." ;;
@@ -163,12 +339,17 @@ check_textual() {
 }
 
 run_python_app() {
+  OVERWATCH_ACTIVE=1
   disable_mouse_reporting
 
-  # We must NOT use: python3 - <<PY (would steal stdin).
-  # Prefer /dev/fd/63 on unix.
-  if [ -r /dev/fd/63 ] 2>/dev/null; then
-    exec "${PYTHON_CMD}" /dev/fd/63 63< <(cat <<PY
+  local tmp
+  if command -v mktemp >/dev/null 2>&1; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/overwatch_XXXXXX.py")"
+  else
+    tmp="${TMPDIR:-/tmp}/overwatch_$$.py"
+  fi
+
+  cat > "${tmp}" <<PY
 import asyncio
 import json
 import os
@@ -302,7 +483,7 @@ class StatusHeader(Static):
 
     def render(self) -> str:
         t = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return f"MODE: {self.mode} | {CURRENT_PLATFORM} | CWD: {self.cwd} | {t} | {self.ai}"
+        return f"OVERWATCH / SENTINEL | {self.mode} | {CURRENT_PLATFORM} | CWD: {self.cwd} | {t} | {self.ai}"
 
 class NavItem(ListItem):
     def __init__(self, label: str, tag: str = ""):
@@ -313,6 +494,7 @@ class NavItem(ListItem):
 class ObservePane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Recent Runs")
+        yield Input(placeholder="Filter runs...", id="observe-filter")
         yield ListView(id="observe-list")
         yield TextArea(id="observe-output", read_only=True)
 
@@ -332,11 +514,24 @@ class OperatePane(Static):
         yield Input(placeholder="Arguments", id="operate-args")
         yield TextArea(id="operate-preview", read_only=True)
 
-class CleanupPane(Static):
+class TerminalInfoPane(Static):
     def compose(self) -> ComposeResult:
-        yield Label("Cleanup (notes + analysis placeholder)")
-        yield TextArea(id="cleanup-input")
-        yield TextArea(id="cleanup-analysis", read_only=True)
+        yield Label("Terminal Operations")
+        yield TextArea(
+            "Use the right pane to run commands.\n"
+            "Enter runs in current CWD.\n"
+            "CTRL+C cancels the active command.\n",
+            read_only=True,
+        )
+
+class SignalPane(Static):
+    def compose(self) -> ComposeResult:
+        yield Label("Signal")
+        yield TextArea(
+            "Telemetry online.\n"
+            "No active alerts.\n",
+            read_only=True,
+        )
 
 class ConfigPane(Static):
     def compose(self) -> ComposeResult:
@@ -410,11 +605,24 @@ class OverwatchApp(App):
         background: #2a1a0a;
         color: {ACCENT};
     }}
+    ListView:focus {{
+        border: solid {ACCENT_DIM};
+    }}
     Input:focus, TextArea:focus {{
         border: solid {ACCENT};
     }}
     #files-hint {{
         color: {ACCENT_DIM};
+    }}
+    #observe-filter {{
+        border: solid {BORDER};
+        background: #111214;
+    }}
+    #observe-list {{
+        border: solid {BORDER};
+    }}
+    #observe-output {{
+        border: solid {BORDER};
     }}
     #term-title {{
         color: {ACCENT};
@@ -435,6 +643,7 @@ class OverwatchApp(App):
         Binding("enter", "enter", "Enter"),
         Binding("r", "refresh", "Refresh"),
         Binding("?", "help", "Help"),
+        Binding("ctrl+c", "cancel", "Cancel"),
     ]
 
     mode = reactive("Observe")
@@ -444,7 +653,9 @@ class OverwatchApp(App):
         self.cwd = REPO_ROOT
         self._running_proc: Optional[asyncio.subprocess.Process] = None
         self._running_task: Optional[asyncio.Task] = None
-        self.nav_map = ["Observe", "Files", "Operate", "Cleanup", "Config", "About"]
+        self.nav_map = ["Observe", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
+        self._observe_filter = ""
+        self._locker_desc = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -456,13 +667,15 @@ class OverwatchApp(App):
                         self.observe = ObservePane(id="observe-pane")
                         self.files = FilesPane(id="files-pane")
                         self.operate = OperatePane(id="operate-pane")
-                        self.cleanup = CleanupPane(id="cleanup-pane")
+                        self.terminal = TerminalInfoPane(id="terminal-pane")
+                        self.signal = SignalPane(id="signal-pane")
                         self.config = ConfigPane(id="config-pane")
                         self.about = AboutPane(id="about-pane")
                         yield self.observe
                         yield self.files
                         yield self.operate
-                        yield self.cleanup
+                        yield self.terminal
+                        yield self.signal
                         yield self.config
                         yield self.about
                 yield TerminalPane(id="right")
@@ -479,6 +692,7 @@ class OverwatchApp(App):
         self.switch_mode("Observe")
         self.refresh_all()
         nav.focus()
+        self._locker_desc = self.load_locker_descriptions()
 
     def update_ai_status(self) -> None:
         env = load_env_file(ENV_FILE)
@@ -500,7 +714,8 @@ class OverwatchApp(App):
         self.observe.display = (name == "Observe")
         self.files.display = (name == "Files")
         self.operate.display = (name == "Operate")
-        self.cleanup.display = (name == "Cleanup")
+        self.terminal.display = (name == "Terminal")
+        self.signal.display = (name == "Signal")
         self.config.display = (name == "Config")
         self.about.display = (name == "About")
 
@@ -510,6 +725,8 @@ class OverwatchApp(App):
     def action_search(self) -> None:
         if self.mode == "Files":
             self.query_one("#files-path", Input).focus()
+        elif self.mode == "Observe":
+            self.query_one("#observe-filter", Input).focus()
 
     def action_refresh(self) -> None:
         self.refresh_all()
@@ -529,6 +746,8 @@ class OverwatchApp(App):
         runs = [p for p in runs if p.is_dir()]
         runs = sorted(runs, key=lambda p: p.name, reverse=True)
         out = self.query_one("#observe-output", TextArea)
+        if self._observe_filter:
+            runs = [p for p in runs if self._observe_filter in p.name.lower()]
         if not runs:
             lv.append(NavItem("No runs yet.", tag="__empty__"))
             out.text = "No runs yet.\n"
@@ -617,11 +836,30 @@ class OverwatchApp(App):
         preview.text = "Select a tool, add args, press Enter to run (with confirmation).\n"
 
     def refresh_config(self) -> None:
-        env = load_env_file(ENV_FILE)
-        lines = [f"Config file: {ENV_FILE}\n"]
+        env_path = ENV_FILE
+        if not env_path.exists() and (CONFIG_DIR / ".env.example").exists():
+            env_path = CONFIG_DIR / ".env.example"
+        env = load_env_file(env_path)
+        lines = [f"Config file: {env_path}\n"]
         lines.append(f"OPENAI_API_KEY: {'set' if env.get('OPENAI_API_KEY') else 'not set'}\n")
         lines.append(f"OPENAI_MODEL: {env.get('OPENAI_MODEL','not set') or 'not set'}\n")
         self.query_one("#config-text", TextArea).text = "".join(lines)
+
+    def load_locker_descriptions(self) -> dict:
+        desc = {}
+        readme = LOCKER_DIR / "README.md"
+        if not readme.exists():
+            return desc
+        try:
+            for line in readme.read_text(errors="ignore").splitlines():
+                if ":" in line and ".sh" in line:
+                    parts = line.split(":", 1)
+                    name = parts[0].strip().lstrip("-* ").strip()
+                    if name.endswith(".sh"):
+                        desc[name] = parts[1].strip()
+        except Exception:
+            return desc
+        return desc
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id == "nav":
@@ -647,7 +885,9 @@ class OverwatchApp(App):
             tool = Path(item.tag)
             args = self.query_one("#operate-args", Input).value.strip()
             cmd = f"{tool} {args}".strip()
-            self.query_one("#operate-preview", TextArea).text = f"CWD: {self.cwd}\nPreview: {cmd}\n"
+            desc = self._locker_desc.get(tool.name, "")
+            extra = f"\nDesc: {desc}\n" if desc else "\n"
+            self.query_one("#operate-preview", TextArea).text = f"CWD: {self.cwd}\nPreview: {cmd}{extra}"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "files-path":
@@ -672,6 +912,14 @@ class OverwatchApp(App):
                 return
             event.input.value = ""
             asyncio.create_task(self.run_terminal_command(cmd))
+        elif event.input.id == "observe-filter":
+            self._observe_filter = event.value.strip().lower()
+            self.refresh_observe()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "observe-filter":
+            self._observe_filter = event.value.strip().lower()
+            self.refresh_observe()
 
     async def action_enter(self) -> None:
         focused = self.focused
@@ -801,6 +1049,14 @@ class OverwatchApp(App):
 
         self._running_task = asyncio.create_task(runner())
 
+    async def action_cancel(self) -> None:
+        if self._running_proc and self._running_task and not self._running_task.done():
+            try:
+                self._running_proc.terminate()
+                self.append_terminal("[cancel] terminated running process.\n")
+            except Exception:
+                self.append_terminal("[cancel] unable to terminate.\n")
+
     async def action_quit(self) -> None:
         if self._running_proc and self._running_task and not self._running_task.done():
             confirm = await self.push_screen(ConfirmScreen("A process is running. Quit and terminate it? Type yes:"))
@@ -815,22 +1071,22 @@ class OverwatchApp(App):
 app = OverwatchApp()
 app.run()
 PY
-)"
-  else
-    # mktemp fallback stub
-    tmp="${TMPDIR:-/tmp}/overwatch_$$.py"
-    cat > "${tmp}" <<'PY'
-print("overwatch.sh: mktemp fallback stub was triggered, but this distribution expects /dev/fd/63.")
-print("If you're seeing this, tell me your platform and shell (bash/zsh/pwsh).")
-raise SystemExit(1)
-PY
-    "${PYTHON_CMD}" "${tmp}"
-    rm -f "${tmp}" 2>/dev/null || true
-    exit 1
-  fi
+  "${PYTHON_CMD}" "${tmp}"
+  rm -f "${tmp}" 2>/dev/null || true
 }
 
 main() {
+  case "${1:-}" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --self-test)
+      check_python
+      self_test
+      exit 0
+      ;;
+  esac
   check_python
   check_textual
   echo "Starting Overwatch (Platform: ${PLATFORM})..."
