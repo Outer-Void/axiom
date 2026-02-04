@@ -29,6 +29,8 @@ RUN_HTTP_CODE=""
 RUN_LATENCY_MS=""
 STARTED_AT=""
 COMMAND_LINE=""
+RUNS_DIR="$(axiom_runs_dir)"
+LAST_REQUEST_FILE=""
 
 log_info() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
@@ -46,6 +48,30 @@ log_error() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
     axiom_log_error "$@"
   fi
+}
+
+mask_api_key() {
+  local key="$1"
+  if [[ -z "$key" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  if [[ "${#key}" -le 4 ]]; then
+    printf '%s' "****"
+    return 0
+  fi
+  printf '%s' "****${key: -4}"
+}
+
+redact_api_key_text() {
+  local text="$1"
+  local key="${OPENAI_API_KEY:-}"
+  if [[ -n "$key" ]]; then
+    local masked
+    masked="$(mask_api_key "$key")"
+    text="${text//$key/$masked}"
+  fi
+  printf '%s' "$text"
 }
 
 now_ms() {
@@ -87,6 +113,7 @@ emit_json_error() {
   if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
     http_code=0
   fi
+  error_message="$(redact_api_key_text "$error_message")"
   printf '{"ok":false,"error":"%s","http_code":%s}\n' \
     "$(json_escape "$error_message")" \
     "$http_code"
@@ -181,6 +208,64 @@ require_dependencies() {
   return 0
 }
 
+curl_supports_option() {
+  local option="$1"
+  curl --help all 2>/dev/null | grep -q -- "${option}"
+}
+
+add_curl_auth_args() {
+  local -n _arr=$1
+  if [[ -n "${OPENAI_NETRC:-}" && -r "${OPENAI_NETRC}" ]]; then
+    _arr+=(--netrc-file "${OPENAI_NETRC}")
+  elif [[ -r "${HOME}/.netrc" ]]; then
+    _arr+=(--netrc-file "${HOME}/.netrc")
+  else
+    _arr+=(-H "Authorization: Bearer ${OPENAI_API_KEY}")
+  fi
+}
+
+rate_limit_pause() {
+  if [[ -z "${RUNS_DIR}" ]]; then
+    return 0
+  fi
+  mkdir -p "${RUNS_DIR}" 2>/dev/null || true
+  LAST_REQUEST_FILE="${RUNS_DIR}/ai_last_request"
+  local now_ts last_ts delta
+  now_ts="$(date +%s)"
+  last_ts="0"
+  if [[ -f "${LAST_REQUEST_FILE}" ]]; then
+    last_ts="$(cat "${LAST_REQUEST_FILE}" 2>/dev/null || echo 0)"
+  fi
+  delta=$((now_ts - last_ts))
+  if [[ "${delta}" -lt 1 ]]; then
+    sleep $((1 - delta))
+  fi
+  printf '%s' "${now_ts}" >"${LAST_REQUEST_FILE}"
+}
+
+update_request_counters() {
+  if [[ -z "${RUNS_DIR}" ]]; then
+    return 0
+  fi
+  mkdir -p "${RUNS_DIR}" 2>/dev/null || true
+  local day month day_file month_file count
+  day="$(date +%Y%m%d)"
+  month="$(date +%Y%m)"
+  day_file="${RUNS_DIR}/ai_requests_${day}"
+  month_file="${RUNS_DIR}/ai_requests_${month}"
+  for file in "${day_file}" "${month_file}"; do
+    count=0
+    if [[ -f "$file" ]]; then
+      count="$(cat "$file" 2>/dev/null || echo 0)"
+    fi
+    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+      count=0
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" >"$file"
+  done
+}
+
 ensure_api_key() {
   local api_key_input=""
   if [[ -n "${OPENAI_API_KEY:-}" ]]; then
@@ -208,6 +293,8 @@ run_test() {
   local base_url model timeout payload
   local max_output_tokens resp_file http_code output_text
   local start_ms end_ms latency_ms
+  local attempt max_attempts backoff
+  local curl_args=()
 
   base_url="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
   model="${OPENAI_MODEL:-gpt-4o-mini}"
@@ -220,25 +307,59 @@ run_test() {
 
   payload="$(jq -n --arg model "$model" --arg input "Say 'ok' and nothing else." --argjson max_output_tokens "$max_output_tokens" '{model:$model,input:$input,max_output_tokens:$max_output_tokens}')"
 
-  resp_file="$(axiom_mktemp)"
-  start_ms="$(now_ms)"
-  http_code="$(curl -sS --max-time "$timeout" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-    -o "$resp_file" \
-    -w "%{http_code}" \
-    "${base_url}/responses" \
-    -d "$payload" || true)"
-  end_ms="$(now_ms)"
-  latency_ms=$((end_ms - start_ms))
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    if [[ "$max_output_tokens" -gt 2000 || "${#payload}" -gt 8000 ]]; then
+      log_warn "Large request payload detected; this may increase costs."
+    fi
+  fi
 
-  output_text="$(jq -r '.output_text // .output[0].content[0].text // empty' "$resp_file" 2>/dev/null || true)"
+  resp_file="$(axiom_mktemp)"
+  max_attempts=3
+  backoff=1
+  http_code="0"
+  output_text=""
+
+  curl_args=(
+    -sS
+    --max-time "$timeout"
+    --max-redirs 5
+    --proto '=https'
+    --proto-redir '=https'
+    -H "Content-Type: application/json"
+    -o "$resp_file"
+    -w "%{http_code}"
+    "${base_url}/responses"
+    -d "$payload"
+  )
+  add_curl_auth_args curl_args
+  if curl_supports_option "--dns-timeout"; then
+    curl_args+=(--dns-timeout 5)
+  fi
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    rate_limit_pause
+    start_ms="$(now_ms)"
+    http_code="$(curl "${curl_args[@]}" || true)"
+    end_ms="$(now_ms)"
+    latency_ms=$((end_ms - start_ms))
+    update_request_counters
+    output_text="$(jq -r '.output_text // .output[0].content[0].text // empty' "$resp_file" 2>/dev/null || true)"
+    RUN_HTTP_CODE="$http_code"
+    RUN_LATENCY_MS="$latency_ms"
+    RUN_OUTPUT_TEXT="$output_text"
+    if [[ "$http_code" != "429" ]]; then
+      break
+    fi
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      if [[ "${CI:-}" != "true" ]]; then
+        log_warn "Rate limited (HTTP 429). Retrying in ${backoff}s..."
+      fi
+      sleep "$backoff"
+      backoff=$((backoff * 2))
+    fi
+  done
 
   rm -f "$resp_file"
-
-  RUN_HTTP_CODE="$http_code"
-  RUN_LATENCY_MS="$latency_ms"
-  RUN_OUTPUT_TEXT="$output_text"
 
   if [[ "$http_code" == "200" && -n "$output_text" ]]; then
     return 0
@@ -369,10 +490,10 @@ main() {
   esac
 
   if [[ "$JSON_MODE" -eq 1 ]]; then
-    emit_json_error "$error_message"
+    emit_json_error "$(redact_api_key_text "$error_message")"
   else
     log_warn "Connectivity test failed (HTTP ${RUN_HTTP_CODE:-unknown})."
-    log_warn "$error_message"
+    log_warn "$(redact_api_key_text "$error_message")"
     print_usage
   fi
   axiom_runs_write_output "$RUN_DIR" "Error: $error_message"
