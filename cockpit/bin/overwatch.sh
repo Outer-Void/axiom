@@ -1178,7 +1178,25 @@ class OverwatchApp(App):
         self.refresh_operate()
         self.refresh_config()
         self.update_ai_status()
-        self.update_cwd_labels()
+
+    def _lv_item_at(self, lv: ListView, index: int):
+        if hasattr(lv, "get_item_at"):
+            try:
+                return lv.get_item_at(index)
+            except Exception:
+                pass
+        try:
+            children = list(lv.children)
+            if 0 <= index < len(children):
+                return children[index]
+        except Exception:
+            pass
+        return None
+
+    def _lv_selected_item(self, lv: ListView):
+        if lv.index is None:
+            return None
+        return self._lv_item_at(lv, lv.index)
 
     def refresh_observe(self) -> None:
         lv = self.query_one("#observe-list", ListView)
@@ -1231,13 +1249,29 @@ class OverwatchApp(App):
                     new_index = idx
                     break
         lv.index = new_index
+        children = list(lv.children)
+        if not children:
+            lv.index = None
+            self._runs_selected_name = None
+            self.update_runs_viewer()
+            return
+        if lv.index is None or lv.index < 0 or lv.index >= len(children):
+            lv.index = 0
         self.open_selected_run_entry()
 
     def open_selected_run_entry(self) -> None:
         lv = self.query_one("#runs-list", ListView)
-        if lv.index is None:
+        item = self._lv_selected_item(lv)
+        if item is None:
+            self._runs_selected_name = None
+            self._runs_selected_file = None
+            files_label = self.query_one("#runs-files-label", Label)
+            files_lv = self.query_one("#runs-files", ListView)
+            files_label.update("Run Files")
+            files_lv.clear()
+            files_lv.display = False
+            self.query_one("#runs-viewer", TextArea).text = "No selection.\n"
             return
-        item = lv.get_item_at(lv.index)
         if not isinstance(item, NavItem) or item.tag == "__empty__":
             self._runs_selected_name = None
             self.update_runs_viewer()
@@ -1279,7 +1313,7 @@ class OverwatchApp(App):
                     new_index = idx
                     break
         files_lv.index = new_index
-        item = files_lv.get_item_at(files_lv.index)
+        item = self._lv_selected_item(files_lv)
         if isinstance(item, NavItem) and item.tag != "__empty__":
             self._runs_selected_file = Path(item.tag).name
 
@@ -1289,20 +1323,20 @@ class OverwatchApp(App):
         tail_status = "on" if self._runs_tail_enabled else "off"
         tail_label.update(f"Viewer (tail: {tail_status})")
         lv = self.query_one("#runs-list", ListView)
-        if lv.index is None:
-            viewer.text = "Select a run entry.\n"
+        item = self._lv_selected_item(lv)
+        if item is None:
+            viewer.text = "No selection.\n"
             return
-        item = lv.get_item_at(lv.index)
         if not isinstance(item, NavItem) or item.tag == "__empty__":
             viewer.text = "No run entry selected.\n"
             return
         path = Path(item.tag)
         if path.is_dir():
             files_lv = self.query_one("#runs-files", ListView)
-            if files_lv.index is None:
+            file_item = self._lv_selected_item(files_lv)
+            if file_item is None:
                 viewer.text = "Select a file from this run.\n"
                 return
-            file_item = files_lv.get_item_at(files_lv.index)
             if not isinstance(file_item, NavItem) or file_item.tag == "__empty__":
                 viewer.text = "No run file selected.\n"
                 return
@@ -1325,9 +1359,9 @@ class OverwatchApp(App):
 
     def open_selected_run(self) -> None:
         lv = self.query_one("#observe-list", ListView)
-        if lv.index is None:
+        item = self._lv_selected_item(lv)
+        if item is None:
             return
-        item = lv.get_item_at(lv.index)
         if not isinstance(item, NavItem) or item.tag == "__empty__":
             return
         run_dir = RUNS_DIR / item.label_text
@@ -1674,21 +1708,19 @@ class OverwatchApp(App):
             run_dir = None
             if self.mode == "Runs":
                 lv = self.query_one("#runs-list", ListView)
-                if lv.index is not None:
-                    item = lv.get_item_at(lv.index)
-                    if isinstance(item, NavItem) and item.tag != "__empty__":
-                        path = Path(item.tag)
-                        if path.is_dir():
-                            run_dir = path
-                        else:
-                            contents = self._read_text_limited(path, max_chars=8000)
-                            return f"File: {path.name}\n\n{contents}", f"run file {path.name}"
+                item = self._lv_selected_item(lv)
+                if isinstance(item, NavItem) and item.tag != "__empty__":
+                    path = Path(item.tag)
+                    if path.is_dir():
+                        run_dir = path
+                    else:
+                        contents = self._read_text_limited(path, max_chars=8000)
+                        return f"File: {path.name}\n\n{contents}", f"run file {path.name}"
             else:
                 lv = self.query_one("#observe-list", ListView)
-                if lv.index is not None:
-                    item = lv.get_item_at(lv.index)
-                    if isinstance(item, NavItem) and item.tag != "__empty__":
-                        run_dir = RUNS_DIR / item.label_text
+                item = self._lv_selected_item(lv)
+                if isinstance(item, NavItem) and item.tag != "__empty__":
+                    run_dir = RUNS_DIR / item.label_text
             if run_dir and run_dir.exists():
                 output = run_dir / "output.log"
                 meta = run_dir / "metadata.json"
@@ -1701,9 +1733,9 @@ class OverwatchApp(App):
             return "", "No run selected."
         if self.mode == "Operate":
             lv = self.query_one("#operate-list", ListView)
-            if lv.index is None:
+            item = self._lv_selected_item(lv)
+            if item is None:
                 return "", "No tool selected."
-            item = lv.get_item_at(lv.index)
             if not isinstance(item, NavItem) or item.tag == "__empty__":
                 return "", "No tool selected."
             tool_path = Path(item.tag)
@@ -1976,9 +2008,9 @@ class OverwatchApp(App):
 
     async def operate_enter(self) -> None:
         lv = self.query_one("#operate-list", ListView)
-        if lv.index is None:
+        item = self._lv_selected_item(lv)
+        if item is None:
             return
-        item = lv.get_item_at(lv.index)
         if not isinstance(item, NavItem) or item.tag == "__empty__":
             return
         tool = Path(item.tag)
