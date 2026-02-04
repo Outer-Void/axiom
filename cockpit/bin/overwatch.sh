@@ -1666,19 +1666,30 @@ class OverwatchApp(App):
 
         self._running_task = asyncio.create_task(runner())
 
+    def _event_tree(self, event):
+        tree = getattr(event, "control", None)
+        if tree is None:
+            tree = getattr(event, "sender", None)
+        if tree is None:
+            try:
+                tree = self.query_one("#files-tree", Tree)
+            except Exception:
+                tree = None
+        return tree
+
     def on_tree_node_selected(self, event) -> None:
         if not TREE_AVAILABLE:
             return
-        tree = event.tree
-        if tree.id != "files-tree":
+        tree = self._event_tree(event)
+        if tree is None or getattr(tree, "id", None) != "files-tree":
             return
         self.handle_tree_selection(event.node, expand_toggle=True)
 
     def on_tree_node_expanded(self, event) -> None:
         if not TREE_AVAILABLE:
             return
-        tree = event.tree
-        if tree.id != "files-tree":
+        tree = self._event_tree(event)
+        if tree is None or getattr(tree, "id", None) != "files-tree":
             return
         self.populate_tree_node(event.node)
 
