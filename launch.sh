@@ -66,8 +66,7 @@ if [[ -f "$PY_VENV" ]]; then
   # shellcheck source=/dev/null
   . "$PY_VENV"
 else
-  log_warn "py_venv.sh not found at repo root"
-  log_warn "Attempting to continue without virtual environment"
+  die "py_venv.sh not found at repo root"
 fi
 
 export AXIOM_RUNTIME=1
@@ -77,9 +76,9 @@ export AXIOM_RUNTIME=1
 ############################################
 
 CANDIDATES=(
+  "$REPO_ROOT/cockpit/bin/overwatch.sh"
   "$REPO_ROOT/cockpit/overwatch.sh"
   "$REPO_ROOT/overwatch.sh"
-  "$REPO_ROOT/cockpit/bin/overwatch.sh"
 )
 
 OVERWATCH=""

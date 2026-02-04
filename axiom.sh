@@ -164,8 +164,6 @@ fi
 log "Repo root : $REPO_ROOT"
 log "Manifest  : $MANIFEST"
 
-[[ -f "$MANIFEST" ]] || die "Manifest not found: $MANIFEST"
-
 if [[ "$NONINTERACTIVE" == "1" ]]; then
   export AXIOM_NONINTERACTIVE=1
 fi
@@ -217,30 +215,47 @@ OVERALL_SUCCESS=0
 STAGE_COUNT=0
 FAILED_STAGES=()
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line#"${line%%[![:space:]]*}"}"
-  line="${line%"${line##*[![:space:]]}"}"
-  [[ -z "$line" ]] && continue
-  
-  STAGE_COUNT=$((STAGE_COUNT + 1))
-  
-  if ! run_stage "$line"; then
-    OVERALL_SUCCESS=1
-    FAILED_STAGES+=("$line")
-    
-    # In non-interactive mode, we can choose to continue or stop
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-      log_warn "Stage failed, but continuing due to non-interactive mode"
-    else
-      printf "Stage failed: %s\nContinue anyway? [y/N] " "$line"
-      read -r continue_response
-      if [[ ! "$continue_response" =~ ^[Yy]$ ]]; then
-        log "Installation aborted by user"
-        break
+run_stage_list() {
+  local stages=("$@")
+  local line
+  for line in "${stages[@]}"; do
+    STAGE_COUNT=$((STAGE_COUNT + 1))
+    if ! run_stage "$line"; then
+      OVERALL_SUCCESS=1
+      FAILED_STAGES+=("$line")
+      if [[ "$NONINTERACTIVE" == "1" ]]; then
+        log_warn "Stage failed, but continuing due to non-interactive mode"
+      else
+        printf "Stage failed: %s\nContinue anyway? [y/N] " "$line"
+        read -r continue_response
+        if [[ ! "$continue_response" =~ ^[Yy]$ ]]; then
+          log "Installation aborted by user"
+          return 1
+        fi
       fi
     fi
-  fi
-done < "$MANIFEST"
+  done
+  return 0
+}
+
+if [[ -f "$MANIFEST" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    if ! run_stage_list "$line"; then
+      break
+    fi
+  done < "$MANIFEST"
+else
+  log_warn "Manifest not found: $MANIFEST"
+  log "Running explicit staged installers instead."
+  default_stages=(
+    "cockpit/bin/cockpit.sh"
+    "cockpit/bin/blux10k.sh"
+  )
+  run_stage_list "${default_stages[@]}"
+fi
 
 ############################################
 # Installation summary

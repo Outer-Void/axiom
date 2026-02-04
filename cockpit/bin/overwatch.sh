@@ -468,6 +468,11 @@ def is_destructive(cmd: str) -> bool:
     ]
     return any(t in s for t in bad)
 
+def ai_request_blocked(text: str) -> bool:
+    if not isinstance(text, str):
+        return True
+    return is_destructive(text)
+
 def tail_text(path: Path, max_chars: int = 9000) -> str:
     try:
         data = path.read_text(errors="ignore")
@@ -1661,7 +1666,7 @@ class OverwatchApp(App):
             resolved = p.expanduser().resolve()
         except Exception as e:
             return f"Invalid path: {e}"
-        bases = self.get_files_root_paths() + [REPO_ROOT, COCKPIT_DIR, LOCKER_DIR, Path.home()]
+        bases = [self.cwd, REPO_ROOT, COCKPIT_DIR, LOCKER_DIR, RUNS_DIR, Path.home()]
         allowed = False
         for base in bases:
             try:
@@ -1932,6 +1937,10 @@ class OverwatchApp(App):
                 raise ValueError("AI request payload must be a string.")
             if len(input_text.encode("utf-8")) > 10 * 1024:
                 raise ValueError("AI request exceeds 10KB limit.")
+            if not self._ai_base_url.startswith("https://"):
+                raise ValueError("AI base URL must use https.")
+            if ai_request_blocked(input_text):
+                raise ValueError("AI request blocked due to destructive command content.")
             payload = {
                 "model": model,
                 "input": input_text,
@@ -1997,6 +2006,10 @@ class OverwatchApp(App):
                 raise ValueError("AI request payload must be a string.")
             if len(input_text.encode("utf-8")) > 10 * 1024:
                 raise ValueError("AI request exceeds 10KB limit.")
+            if not self._ai_base_url.startswith("https://"):
+                raise ValueError("AI base URL must use https.")
+            if ai_request_blocked(input_text):
+                raise ValueError("AI request blocked due to destructive command content.")
             payload = {"model": model, "input": input_text}
             data = json.dumps(payload).encode("utf-8")
             url = f"{self._ai_base_url}/responses"

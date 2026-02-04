@@ -208,6 +208,26 @@ check_pkg_manager() {
   return 0
 }
 
+cockpit_mktemp() {
+  if declare -F axiom_mktemp >/dev/null 2>&1; then
+    axiom_mktemp
+    return 0
+  fi
+  if axiom_command_exists mktemp; then
+    mktemp 2>/dev/null || mktemp -t axiom 2>/dev/null || true
+  else
+    local tmp_dir tmp_file
+    tmp_dir="${TMPDIR:-/tmp}"
+    for _ in 1 2 3 4 5; do
+      tmp_file="${tmp_dir}/axiom_temp_$$_${RANDOM}_${RANDOM}"
+      if (umask 077 && set -o noclobber && : > "$tmp_file") 2>/dev/null; then
+        printf '%s\n' "$tmp_file"
+        return 0
+      fi
+    done
+  fi
+}
+
 configure_locales() {
   if [ -f /etc/locale.gen ]; then
     if grep -q '^# en_US.UTF-8 UTF-8' /etc/locale.gen; then
@@ -493,7 +513,7 @@ provision_debian() {
 
 create_debian_provision_script() {
   local temp_file
-  temp_file="$(axiom_mktemp)"
+  temp_file="$(cockpit_mktemp)"
   if [ -z "$temp_file" ] || [ ! -f "$temp_file" ]; then
     log_error "Failed to create temporary provision script."
     return 1
