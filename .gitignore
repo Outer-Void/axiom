@@ -840,3 +840,7 @@ test-reports/
 # Performance results
 perf/
 benchmarks/
+
+# AXIOM runtime logs / flight recorder
+runs/*
+!runs/README.md
