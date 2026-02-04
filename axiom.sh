@@ -10,6 +10,7 @@ set -Eeuo pipefail
 
 die() { echo "AXIOM: ERROR: $*" >&2; exit 1; }
 log() { echo "AXIOM: $*"; }
+log_warn() { echo "AXIOM: WARN: $*" >&2; }
 
 ############################################
 # Resolve repo root
@@ -28,6 +29,46 @@ resolve_self() {
 
 REPO_ROOT="$(resolve_self)"
 cd "$REPO_ROOT" || die "Failed to cd to repo root: $REPO_ROOT"
+
+############################################
+# Pre-flight safety checks
+############################################
+
+preflight_checks() {
+  log "Running pre-flight safety checks"
+  
+  # Check disk space (minimum 500MB free)
+  local min_space_mb=500
+  local available_kb
+  available_kb=$(df -k "$REPO_ROOT" 2>/dev/null | awk 'NR==2 {print $4}' 2>/dev/null || echo "0")
+  
+  if [ -n "$available_kb" ] && [ "$available_kb" != "0" ]; then
+    local available_mb=$((available_kb / 1024))
+    if [ $available_mb -lt $min_space_mb ]; then
+      log_warn "Low disk space: ${available_mb}MB available, ${min_space_mb}MB recommended"
+    else
+      log "Disk space: ${available_mb}MB available"
+    fi
+  fi
+  
+  # Check for conflicting processes
+  local conflicts=()
+  for proc in "${conflicts[@]}"; do
+    if pgrep -x "$proc" >/dev/null 2>&1; then
+      log_warn "Process $proc is running (may cause conflicts)"
+    fi
+  done
+  
+  # Validate we're in the correct directory structure
+  local required_dirs=("cockpit" "locker" "cockpit/bin" "cockpit/core" "cockpit/config")
+  for dir in "${required_dirs[@]}"; do
+    if [ ! -d "$dir" ]; then
+      die "Missing required directory: $dir"
+    fi
+  done
+  
+  log "Pre-flight checks passed"
+}
 
 ############################################
 # Python virtual environment (root)
@@ -68,6 +109,7 @@ Options:
   --manifest <path>     Use a custom manifest file
   --dry-run             Print actions without executing
   --noninteractive      Disable prompts for child scripts
+  --skip-preflight      Skip safety checks (not recommended)
   -h, --help            Show help
 
 Env vars:
@@ -76,6 +118,8 @@ Env vars:
   AXIOM_NONINTERACTIVE=1
 USAGE
 }
+
+SKIP_PREFLIGHT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,6 +137,10 @@ while [[ $# -gt 0 ]]; do
       NONINTERACTIVE="1"
       shift
       ;;
+    --skip-preflight)
+      SKIP_PREFLIGHT="1"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -104,8 +152,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 ############################################
-# Preflight
+# Preflight (unless skipped)
 ############################################
+
+if [[ "$SKIP_PREFLIGHT" == "0" ]]; then
+  preflight_checks
+else
+  log_warn "Skipping pre-flight safety checks"
+fi
 
 log "Repo root : $REPO_ROOT"
 log "Manifest  : $MANIFEST"
@@ -123,29 +177,94 @@ fi
 run_stage() {
   local rel="$1"
   local path="$REPO_ROOT/$rel"
+  local started ended duration
 
   [[ -z "$rel" || "$rel" =~ ^# ]] && return 0
   [[ -f "$path" ]] || die "Missing installer: $rel"
   [[ -x "$path" ]] || die "Installer not executable: $rel"
 
   log "==> RUN: $rel"
+  started=$(date +%s)
 
   if [[ "$DRY_RUN" == "1" ]]; then
     log "    (dry-run)"
     return 0
   fi
 
-  "$path"
-  log "<== OK:  $rel"
+  # Execute with timeout protection
+  timeout 1800 "$path"  # 30 minute timeout
+  local exit_code=$?
+  
+  ended=$(date +%s)
+  duration=$((ended - started))
+  
+  if [[ $exit_code -eq 124 ]]; then
+    log_warn "<== TIMEOUT: $rel (exceeded 30 minutes)"
+    return 1
+  elif [[ $exit_code -ne 0 ]]; then
+    log_warn "<== FAILED: $rel (exit code: $exit_code, duration: ${duration}s)"
+    return $exit_code
+  else
+    log "<== OK:  $rel (duration: ${duration}s)"
+    return 0
+  fi
 }
 
 log "Starting AXIOM full install sequence"
+
+# Track overall success
+OVERALL_SUCCESS=0
+STAGE_COUNT=0
+FAILED_STAGES=()
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line#"${line%%[![:space:]]*}"}"
   line="${line%"${line##*[![:space:]]}"}"
   [[ -z "$line" ]] && continue
-  run_stage "$line"
+  
+  STAGE_COUNT=$((STAGE_COUNT + 1))
+  
+  if ! run_stage "$line"; then
+    OVERALL_SUCCESS=1
+    FAILED_STAGES+=("$line")
+    
+    # In non-interactive mode, we can choose to continue or stop
+    if [[ "$NONINTERACTIVE" == "1" ]]; then
+      log_warn "Stage failed, but continuing due to non-interactive mode"
+    else
+      printf "Stage failed: %s\nContinue anyway? [y/N] " "$line"
+      read -r continue_response
+      if [[ ! "$continue_response" =~ ^[Yy]$ ]]; then
+        log "Installation aborted by user"
+        break
+      fi
+    fi
+  fi
 done < "$MANIFEST"
 
-log "AXIOM installation complete"
+############################################
+# Installation summary
+############################################
+
+log "AXIOM installation sequence completed"
+
+if [[ $OVERALL_SUCCESS -eq 0 ]]; then
+  log "✅ SUCCESS: All $STAGE_COUNT stages completed successfully"
+else
+  log_warn "⚠️  PARTIAL: $STAGE_COUNT stages run, ${#FAILED_STAGES[@]} failed"
+  if [[ ${#FAILED_STAGES[@]} -gt 0 ]]; then
+    log_warn "Failed stages:"
+    for stage in "${FAILED_STAGES[@]}"; do
+      log_warn "  - $stage"
+    done
+  fi
+fi
+
+# Final instructions
+if [[ -f "$REPO_ROOT/launch.sh" && -x "$REPO_ROOT/launch.sh" ]]; then
+  log ""
+  log "To launch AXIOM cockpit:"
+  log "  ./launch.sh"
+fi
+
+exit $OVERALL_SUCCESS
