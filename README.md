@@ -1,5 +1,5 @@
 ---
-# `AXIOM`
+![AXIOM Banner](assets/axiom_banner.png)
 ---
 
 > SENTINEL / NIGHT OPS — Debian-first dev cockpit
