@@ -110,6 +110,7 @@ parse_args() {
 OS_FAMILY=""
 ENVIRONMENT="native"
 PLATFORM_LABEL=""
+LAST_ZSHRC_BACKUP=""
 
 detect_platform() {
   local platform
@@ -125,6 +126,22 @@ detect_platform() {
     OS_FAMILY="termux"
     ENVIRONMENT="termux"
     return 0
+  fi
+
+  if [[ -f "/proc/sys/fs/binfmt_misc/WSLInterop" ]]; then
+    PLATFORM_LABEL="wsl2"
+  fi
+
+  if [[ -f "/.dockerenv" ]] || grep -qi "container" /proc/1/cgroup 2>/dev/null; then
+    ENVIRONMENT="container"
+  fi
+
+  if command -v getconf >/dev/null 2>&1; then
+    if [[ "$(getconf LONG_BIT 2>/dev/null)" == "32" ]]; then
+      axiom_log_warn "32-bit architecture detected; some dependencies may be unavailable."
+    fi
+  elif [[ "$(uname -m)" =~ i[0-9]86 ]]; then
+    axiom_log_warn "32-bit architecture detected; some dependencies may be unavailable."
   fi
 
   if [[ "${platform}" == "wsl" ]]; then
@@ -159,21 +176,21 @@ get_sudo_prefix() {
 apt_get_update() {
   local sudo_prefix
   sudo_prefix=$(get_sudo_prefix)
+  local cmd=(apt-get update)
   if [[ -n "${sudo_prefix}" ]]; then
-    ${sudo_prefix} apt-get update
-  else
-    apt-get update
+    cmd=(sudo apt-get update)
   fi
+  run_with_timeout 60 "${cmd[@]}"
 }
 
 apt_get_install() {
   local sudo_prefix
   sudo_prefix=$(get_sudo_prefix)
+  local cmd=(apt-get install -y "$@")
   if [[ -n "${sudo_prefix}" ]]; then
-    ${sudo_prefix} apt-get install -y "$@"
-  else
-    apt-get install -y "$@"
+    cmd=(sudo apt-get install -y "$@")
   fi
+  run_with_timeout 300 "${cmd[@]}"
 }
 
 apt_is_package_available() {
@@ -202,21 +219,53 @@ pkg_install_optional() {
   fi
 }
 
+run_with_timeout() {
+  local timeout_s="$1"
+  shift
+  if axiom_command_exists timeout; then
+    timeout "${timeout_s}" "$@"
+  else
+    "$@"
+  fi
+}
+
+retry_command() {
+  local attempts="$1"
+  shift
+  local attempt=1
+  while [[ "${attempt}" -le "${attempts}" ]]; do
+    if "$@"; then
+      return 0
+    fi
+    axiom_log_warn "Command failed (attempt ${attempt}/${attempts}): $*"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 install_dependencies() {
   axiom_log_info "Installing dependencies for ${OS_FAMILY} (${ENVIRONMENT}) [${PLATFORM_LABEL}]"
 
   case "${OS_FAMILY}" in
     debian)
-      apt_get_update
-      apt_get_install zsh git curl wget unzip ca-certificates locales fontconfig fzf ripgrep jq
+      if ! retry_command 3 apt_get_update; then
+        axiom_log_warn "apt-get update failed after retries; continuing."
+      fi
+      if ! retry_command 3 apt_get_install zsh git curl wget unzip ca-certificates locales fontconfig fzf ripgrep jq; then
+        axiom_log_warn "apt-get install failed after retries; continuing."
+      fi
       apt_install_optional bat
       apt_install_optional eza
       apt_install_optional fd-find
       apt_install_optional neofetch
       ;;
     termux)
-      pkg update
-      pkg install -y zsh git curl wget unzip ca-certificates fontconfig fzf ripgrep jq python3
+      if ! retry_command 3 run_with_timeout 60 pkg update; then
+        axiom_log_warn "pkg update failed after retries; continuing."
+      fi
+      if ! retry_command 3 run_with_timeout 300 pkg install -y zsh git curl wget unzip ca-certificates fontconfig fzf ripgrep jq python3; then
+        axiom_log_warn "pkg install failed after retries; continuing."
+      fi
       pkg_install_optional bat
       pkg_install_optional eza
       pkg_install_optional fd
@@ -353,6 +402,7 @@ backup_zshrc() {
     local backup="${zshrc_file}.bak.$(date +%Y%m%d-%H%M%S)"
     cp "${zshrc_file}" "${backup}"
     axiom_log_info "Backed up .zshrc to ${backup}"
+    LAST_ZSHRC_BACKUP="${backup}"
   fi
 }
 
@@ -360,6 +410,26 @@ ensure_zshrc_block() {
   local zshrc_file="$HOME/.zshrc"
   local block
   block="$(render_zshrc_block)"
+
+  if [[ -f "${zshrc_file}" ]]; then
+    if [[ -z "${LAST_ZSHRC_BACKUP}" || ! -r "${LAST_ZSHRC_BACKUP}" ]]; then
+      axiom_log_warn "Backup verification failed; skipping .zshrc modification."
+      return 1
+    fi
+    if [[ ! -w "${zshrc_file}" ]]; then
+      axiom_log_warn ".zshrc is not writable; skipping modification."
+      return 1
+    fi
+    if [[ "$(wc -c < "${zshrc_file}" 2>/dev/null || echo 0)" -gt $((10 * 1024 * 1024)) ]]; then
+      axiom_log_warn ".zshrc exceeds 10MB; skipping modification."
+      return 0
+    fi
+  else
+    if [[ ! -w "${HOME}" ]]; then
+      axiom_log_warn "Home directory is not writable; skipping .zshrc creation."
+      return 1
+    fi
+  fi
 
   if [[ ! -f "${zshrc_file}" ]]; then
     printf '%s\n' "${block}" > "${zshrc_file}"
@@ -374,9 +444,21 @@ ensure_zshrc_block() {
       $0 == end {in_block=0; next}
       !in_block {print}
     ' "${zshrc_file}" > "${tmp}"
-    mv "${tmp}" "${zshrc_file}"
+    if ! mv "${tmp}" "${zshrc_file}"; then
+      axiom_log_warn "Failed to update .zshrc; attempting rollback."
+      if [[ -n "${LAST_ZSHRC_BACKUP}" && -r "${LAST_ZSHRC_BACKUP}" ]]; then
+        cp "${LAST_ZSHRC_BACKUP}" "${zshrc_file}" && axiom_log_warn "Rollback complete."
+      fi
+      return 1
+    fi
   else
-    printf '\n%s\n' "${block}" >> "${zshrc_file}"
+    if ! printf '\n%s\n' "${block}" >> "${zshrc_file}"; then
+      axiom_log_warn "Failed to append to .zshrc; attempting rollback."
+      if [[ -n "${LAST_ZSHRC_BACKUP}" && -r "${LAST_ZSHRC_BACKUP}" ]]; then
+        cp "${LAST_ZSHRC_BACKUP}" "${zshrc_file}" && axiom_log_warn "Rollback complete."
+      fi
+      return 1
+    fi
   fi
 }
 

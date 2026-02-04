@@ -118,15 +118,94 @@ pkg_install() {
 run_as_user() {
   local user="$1"
   shift
+  if [ -z "${user:-}" ]; then
+    log_error "run_as_user requires a non-empty user"
+    return 1
+  fi
+  if [ "$#" -le 0 ]; then
+    log_error "run_as_user requires a command to execute"
+    return 1
+  fi
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      *'`'*|*'$('*)
+        log_error "run_as_user rejected unsafe argument: $arg"
+        return 1
+        ;;
+    esac
+  done
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     if axiom_command_exists sudo; then
       sudo -u "$user" "$@"
     else
-      su - "$user" -c "$(printf '%q ' "$@")"
+      local cmd=("$@")
+      su - "$user" -c "$(printf '%s ' "${cmd[@]}")" --
     fi
   else
     "$@"
   fi
+}
+
+check_disk_space() {
+  local target="${1:-/}"
+  local min_kb=$((1024 * 1024))
+  local avail_kb
+  avail_kb="$(df -Pk "$target" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [ -z "$avail_kb" ] || ! [ "$avail_kb" -ge "$min_kb" ] 2>/dev/null; then
+    log_error "Insufficient disk space on ${target}. Require at least 1GB free."
+    return 1
+  fi
+  return 0
+}
+
+check_memory_warn() {
+  local min_mb=2048
+  local mem_kb=""
+  if [ -r /proc/meminfo ]; then
+    mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+  elif axiom_command_exists sysctl; then
+    local mem_bytes
+    mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+    if [ -n "$mem_bytes" ]; then
+      mem_kb=$((mem_bytes / 1024))
+    fi
+  fi
+  if [ -n "$mem_kb" ]; then
+    local mem_mb=$((mem_kb / 1024))
+    if [ "$mem_mb" -lt "$min_mb" ]; then
+      log_warn "Low memory detected (${mem_mb}MB). Provisioning may be slow or unreliable."
+    fi
+  else
+    log_warn "Unable to determine total memory for provisioning checks."
+  fi
+}
+
+check_network() {
+  local url="${1:-https://deb.debian.org}"
+  if axiom_command_exists curl; then
+    curl -fsSL --max-time 5 "$url" >/dev/null 2>&1 && return 0
+  elif axiom_command_exists wget; then
+    wget -q --spider --timeout=5 "$url" >/dev/null 2>&1 && return 0
+  else
+    log_warn "Network check skipped: curl/wget not available."
+    return 0
+  fi
+  log_error "Network connectivity check failed for ${url}."
+  return 1
+}
+
+check_pkg_manager() {
+  local mgr="$1"
+  if ! axiom_command_exists "$mgr"; then
+    log_error "Required package manager not found: $mgr"
+    return 1
+  fi
+  if ! "$mgr" --version >/dev/null 2>&1; then
+    log_error "Package manager health check failed: $mgr"
+    return 1
+  fi
+  return 0
 }
 
 configure_locales() {
@@ -274,6 +353,11 @@ summarize_installation() {
 }
 
 provision_debian() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://deb.debian.org" || return 1
+  check_pkg_manager apt-get || return 1
+
   local installed_list=()
   local remaining_list=()
   local user_created=0
@@ -410,6 +494,15 @@ provision_debian() {
 create_debian_provision_script() {
   local temp_file
   temp_file="$(axiom_mktemp)"
+  if [ -z "$temp_file" ] || [ ! -f "$temp_file" ]; then
+    log_error "Failed to create temporary provision script."
+    return 1
+  fi
+  if ! chmod 700 "$temp_file"; then
+    log_error "Failed to set permissions on provision script."
+    return 1
+  fi
+  trap "rm -f '${temp_file}' 2>/dev/null || true" EXIT INT TERM
   cat <<'EOS' >"$temp_file"
 #!/usr/bin/env bash
 set -euo pipefail
@@ -496,15 +589,88 @@ apt_install() {
 run_as_user() {
   local user="$1"
   shift
+  if [ -z "${user:-}" ]; then
+    log_error "run_as_user requires a non-empty user"
+    return 1
+  fi
+  if [ "$#" -le 0 ]; then
+    log_error "run_as_user requires a command to execute"
+    return 1
+  fi
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      *'`'*|*'$('*)
+        log_error "run_as_user rejected unsafe argument: $arg"
+        return 1
+        ;;
+    esac
+  done
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     if axiom_command_exists sudo; then
       sudo -u "$user" "$@"
     else
-      su - "$user" -c "$(printf '%q ' "$@")"
+      local cmd=("$@")
+      su - "$user" -c "$(printf '%s ' "${cmd[@]}")" --
     fi
   else
     "$@"
   fi
+}
+
+check_disk_space() {
+  local target="${1:-/}"
+  local min_kb=$((1024 * 1024))
+  local avail_kb
+  avail_kb="$(df -Pk "$target" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [ -z "$avail_kb" ] || ! [ "$avail_kb" -ge "$min_kb" ] 2>/dev/null; then
+    log_error "Insufficient disk space on ${target}. Require at least 1GB free."
+    return 1
+  fi
+  return 0
+}
+
+check_memory_warn() {
+  local min_mb=2048
+  local mem_kb=""
+  if [ -r /proc/meminfo ]; then
+    mem_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+  fi
+  if [ -n "$mem_kb" ]; then
+    local mem_mb=$((mem_kb / 1024))
+    if [ "$mem_mb" -lt "$min_mb" ]; then
+      log_warn "Low memory detected (${mem_mb}MB). Provisioning may be slow or unreliable."
+    fi
+  else
+    log_warn "Unable to determine total memory for provisioning checks."
+  fi
+}
+
+check_network() {
+  local url="${1:-https://deb.debian.org}"
+  if axiom_command_exists curl; then
+    curl -fsSL --max-time 5 "$url" >/dev/null 2>&1 && return 0
+  elif axiom_command_exists wget; then
+    wget -q --spider --timeout=5 "$url" >/dev/null 2>&1 && return 0
+  else
+    log_warn "Network check skipped: curl/wget not available."
+    return 0
+  fi
+  log_error "Network connectivity check failed for ${url}."
+  return 1
+}
+
+check_pkg_manager() {
+  local mgr="$1"
+  if ! axiom_command_exists "$mgr"; then
+    log_error "Required package manager not found: $mgr"
+    return 1
+  fi
+  if ! "$mgr" --version >/dev/null 2>&1; then
+    log_error "Package manager health check failed: $mgr"
+    return 1
+  fi
+  return 0
 }
 
 configure_locales() {
@@ -652,6 +818,11 @@ summarize_installation() {
 }
 
 provision_debian() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://deb.debian.org" || return 1
+  check_pkg_manager apt-get || return 1
+
   local installed_list=()
   local remaining_list=()
   local user_created=0
@@ -787,6 +958,10 @@ provision_debian() {
 
 provision_debian
 EOS
+  if [ ! -s "$temp_file" ]; then
+    log_error "Provision script is empty or missing after creation."
+    return 1
+  fi
   chmod 700 "$temp_file"
   printf '%s\n' "$temp_file"
 }
@@ -810,6 +985,11 @@ proot_distro_has_debian() {
 }
 
 provision_termux() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://packages.termux.org" || return 1
+  check_pkg_manager pkg || return 1
+
   log_info "Ensuring Termux baseline dependencies"
   local packages=(
     python3
@@ -851,6 +1031,10 @@ provision_termux() {
 }
 
 provision_macos() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://brew.sh" || return 1
+
   local installed_list=()
   local remaining_list=()
   local needs_xcode=0
@@ -923,6 +1107,10 @@ provision_macos() {
 }
 
 provision_windows() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://aka.ms" || return 1
+
   log_info "Detected Windows native environment"
   if axiom_command_exists wsl.exe || axiom_command_exists wsl; then
     local wsl_cmd
@@ -1001,6 +1189,10 @@ is_debian_like() {
 }
 
 provision_non_debian_linux() {
+  check_disk_space "/" || return 1
+  check_memory_warn
+  check_network "https://www.kernel.org" || return 1
+
   log_warn "Non-Debian Linux detected. Attempting best-effort native install."
 
   local installed_list=()

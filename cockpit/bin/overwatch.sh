@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pw
 COCKPIT_DIR="$(cd -P -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
 CORE_DIR="${COCKPIT_DIR}/core"
 OVERWATCH_ACTIVE=0
+OVERWATCH_TMP_DIR=""
 
 # Source cockpit/core in required order.
 # shellcheck source=/dev/null
@@ -68,6 +69,10 @@ cleanup() {
   if [ "${OVERWATCH_ACTIVE}" -eq 1 ]; then
     restore_terminal
     jobs -p | xargs kill -9 2>/dev/null || true
+  fi
+  if [ -n "${OVERWATCH_TMP_DIR}" ]; then
+    # Best-effort secure cleanup; filesystem-level wiping is not guaranteed.
+    rm -rf "${OVERWATCH_TMP_DIR}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -310,17 +315,31 @@ run_python_app() {
   OVERWATCH_ACTIVE=1
   disable_mouse_reporting
 
-  local tmp
-  if command -v mktemp >/dev/null 2>&1; then
-    tmp="$(mktemp "${TMPDIR:-/tmp}/overwatch_XXXXXX.py")"
-  else
-    tmp="${TMPDIR:-/tmp}/overwatch_$$.py"
+  local tmp_dir tmp
+  read -r tmp_dir tmp < <("${PYTHON_CMD}" - <<'PY'
+import os
+import tempfile
+
+tmp_dir = tempfile.mkdtemp(prefix="overwatch_")
+fd, path = tempfile.mkstemp(prefix="app_", suffix=".py", dir=tmp_dir)
+os.close(fd)
+os.chmod(tmp_dir, 0o700)
+os.chmod(path, 0o700)
+print(tmp_dir)
+print(path)
+PY
+)
+  if [ -z "${tmp:-}" ] || [ ! -f "${tmp}" ]; then
+    echo "Error: failed to create temporary app file." >&2
+    exit 1
   fi
+  OVERWATCH_TMP_DIR="${tmp_dir}"
 
   cat > "${tmp}" <<PY
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import string
@@ -430,7 +449,23 @@ def write_metadata(run_dir: Path, mode: str, action: str, command: str, cwd: Pat
 
 def is_destructive(cmd: str) -> bool:
     s = cmd.lower()
-    bad = ["rm -rf", "rm -fr", "mkfs", "dd ", "shutdown", "reboot", "poweroff", "halt", ":(){:|:&};:"]
+    bad = [
+        "rm -rf /",
+        "rm -fr /",
+        "rm -rf ~",
+        "rm -fr ~",
+        "rm -rf $home",
+        "rm -fr $home",
+        "mkfs",
+        "dd if=",
+        "dd of=/dev/",
+        "wipefs",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "halt",
+        ":(){:|:&};:",
+    ]
     return any(t in s for t in bad)
 
 def tail_text(path: Path, max_chars: int = 9000) -> str:
@@ -441,6 +476,7 @@ def tail_text(path: Path, max_chars: int = 9000) -> str:
         return "(unable to read)"
 
 def sanitize_ai_text(text: str, secret: str = "") -> str:
+    text = strip_html_tags(text)
     safe = "".join(ch for ch in text if ch.isprintable() or ch in "\n\t")
     if secret:
         safe = safe.replace(secret, "[redacted]")
@@ -473,6 +509,12 @@ def extract_ai_text(raw: str) -> str:
             if chunks:
                 return "\n".join(chunks).strip()
     return raw.strip()
+
+def strip_html_tags(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    no_scripts = re.sub(r"(?is)<script.*?>.*?</script>", "", text)
+    return re.sub(r"(?s)<[^>]+>", "", no_scripts)
 
 def list_dir_entries(cwd: Path) -> Tuple[list, str]:
     try:
@@ -969,8 +1011,9 @@ class OverwatchApp(App):
 
     def __init__(self):
         super().__init__()
-        self._running_proc: Optional[asyncio.subprocess.Process] = None
-        self._running_task: Optional[asyncio.Task] = None
+        self._running_procs: list[asyncio.subprocess.Process] = []
+        self._running_tasks: list[asyncio.Task] = []
+        self._running_limit = 2
         self.nav_map = ["Observe", "Runs", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
         self._observe_filter = ""
         self._runs_filter = ""
@@ -1606,21 +1649,44 @@ class OverwatchApp(App):
             return False
         return str(p) not in self._files_allow_large
 
+    def _is_within_base(self, target: Path, base: Path) -> bool:
+        try:
+            target.relative_to(base)
+            return True
+        except Exception:
+            return False
+
     def preview_path(self, p: Path) -> str:
         try:
-            st = p.stat()
+            resolved = p.expanduser().resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        bases = self.get_files_root_paths() + [REPO_ROOT, COCKPIT_DIR, LOCKER_DIR, Path.home()]
+        allowed = False
+        for base in bases:
+            try:
+                base_resolved = base.expanduser().resolve()
+            except Exception:
+                continue
+            if self._is_within_base(resolved, base_resolved):
+                allowed = True
+                break
+        if not allowed:
+            return f"Access denied: {resolved} is outside allowed locations.\n"
+        try:
+            st = resolved.stat()
         except Exception as e:
             return f"Cannot stat: {e}"
         mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        if p.is_dir():
+        if resolved.is_dir():
             try:
-                count = sum(1 for _ in p.iterdir())
+                count = sum(1 for _ in resolved.iterdir())
             except Exception:
                 count = -1
-            return f"DIR: {p}\nModified: {mtime}\nItems: {count}\n"
+            return f"DIR: {resolved}\nModified: {mtime}\nItems: {count}\n"
         size = st.st_size
-        head = f"FILE: {p}\nModified: {mtime}\nSize: {size} bytes\n\n"
-        if size > self._files_preview_limit and str(p) not in self._files_allow_large:
+        head = f"FILE: {resolved}\nModified: {mtime}\nSize: {size} bytes\n\n"
+        if size > self._files_preview_limit and str(resolved) not in self._files_allow_large:
             limit_mb = self._files_preview_limit / (1024 * 1024)
             size_mb = size / (1024 * 1024)
             return (
@@ -1628,9 +1694,11 @@ class OverwatchApp(App):
                 f"(preview blocked: {size_mb:.2f} MB > {limit_mb:.2f} MB limit)\n"
                 "Press [P] to request an 'Open anyway' confirmation.\n"
             )
+        if os.access(str(resolved), os.X_OK):
+            return head + "(executable file preview skipped)\n"
         try:
             max_bytes = 20000
-            data = p.read_bytes()[:max_bytes]
+            data = resolved.read_bytes()[:max_bytes]
             if b"\x00" in data:
                 return head + "(binary file preview skipped)\n"
             content = data.decode(errors="ignore")
@@ -1857,11 +1925,16 @@ class OverwatchApp(App):
         started = now_utc()
         exit_code = 1
         response_text = ""
+        input_text = f"{prompt}\n\n{context}"
 
         def do_request() -> str:
+            if not isinstance(input_text, str):
+                raise ValueError("AI request payload must be a string.")
+            if len(input_text.encode("utf-8")) > 10 * 1024:
+                raise ValueError("AI request exceeds 10KB limit.")
             payload = {
                 "model": model,
-                "input": f"{prompt}\n\n{context}",
+                "input": input_text,
             }
             data = json.dumps(payload).encode("utf-8")
             url = f"{self._ai_base_url}/responses"
@@ -1879,6 +1952,7 @@ class OverwatchApp(App):
         try:
             raw = await asyncio.to_thread(do_request)
             response_text = extract_ai_text(raw) or raw
+            response_text = strip_html_tags(response_text)
             self.ai_emit(action, response_text, status="ok", model=model)
             exit_code = 0
         except Exception as e:
@@ -1916,9 +1990,14 @@ class OverwatchApp(App):
         started = now_utc()
         exit_code = 1
         response_text = ""
+        input_text = "Say ok"
 
         def do_request() -> str:
-            payload = {"model": model, "input": "Say ok"}
+            if not isinstance(input_text, str):
+                raise ValueError("AI request payload must be a string.")
+            if len(input_text.encode("utf-8")) > 10 * 1024:
+                raise ValueError("AI request exceeds 10KB limit.")
+            payload = {"model": model, "input": input_text}
             data = json.dumps(payload).encode("utf-8")
             url = f"{self._ai_base_url}/responses"
             req = urllib.request.Request(
@@ -1935,6 +2014,7 @@ class OverwatchApp(App):
         try:
             raw = await asyncio.to_thread(do_request)
             response_text = extract_ai_text(raw) or raw
+            response_text = strip_html_tags(response_text)
             self.ai_emit(action, response_text, status="ok", model=model)
             exit_code = 0
         except Exception as e:
@@ -2088,24 +2168,39 @@ class OverwatchApp(App):
         if confirm != "yes":
             self.append_terminal(f"[cancelled] {cmd}\n")
             return
-        await self.run_and_stream(mode="operate", action=tool.stem, command=cmd, cwd=self.cwd)
-
-    async def run_terminal_command(self, cmd: str) -> None:
+        allow_destructive = False
         if is_destructive(cmd):
             confirm = await self.push_screen(ConfirmScreen(f"Destructive command detected:\n{cmd}\nType yes to run:"))
             if confirm != "yes":
                 self.append_terminal(f"[blocked] {cmd}\n")
                 return
-        await self.run_and_stream(mode="terminal", action="shell", command=cmd, cwd=self.cwd)
+            allow_destructive = True
+        await self.run_and_stream(mode="operate", action=tool.stem, command=cmd, cwd=self.cwd, allow_destructive=allow_destructive)
+
+    async def run_terminal_command(self, cmd: str) -> None:
+        allow_destructive = False
+        if is_destructive(cmd):
+            confirm = await self.push_screen(ConfirmScreen(f"Destructive command detected:\n{cmd}\nType yes to run:"))
+            if confirm != "yes":
+                self.append_terminal(f"[blocked] {cmd}\n")
+                return
+            allow_destructive = True
+        await self.run_and_stream(mode="terminal", action="shell", command=cmd, cwd=self.cwd, allow_destructive=allow_destructive)
 
     def append_terminal(self, text: str) -> None:
         out = self.query_one("#term-output", TextArea)
         out.text += text
         out.scroll_end(animate=False)
 
-    async def run_and_stream(self, mode: str, action: str, command: str, cwd: Path) -> None:
-        if self._running_task and not self._running_task.done():
-            self.append_terminal("[busy] A process is already running.\n")
+    async def run_and_stream(self, mode: str, action: str, command: str, cwd: Path, allow_destructive: bool = False) -> None:
+        if not isinstance(command, str) or not command.strip():
+            self.append_terminal("[error] command must be a non-empty string.\n")
+            return
+        if is_destructive(command) and not allow_destructive:
+            self.append_terminal(f"[blocked] {command}\n")
+            return
+        if len(self._running_tasks) >= self._running_limit:
+            self.append_terminal("[busy] Process limit reached (max 2 concurrent).\n")
             return
 
         run_dir = make_run_dir(mode, action)
@@ -2127,6 +2222,8 @@ class OverwatchApp(App):
 
         async def runner():
             exit_code = 1
+            start_time = asyncio.get_event_loop().time()
+            proc: Optional[asyncio.subprocess.Process] = None
             try:
                 proc = await asyncio.create_subprocess_shell(
                     shell_cmd,
@@ -2134,10 +2231,14 @@ class OverwatchApp(App):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-                self._running_proc = proc
+                self._running_procs.append(proc)
                 with out_path.open("w", encoding="utf-8", errors="ignore") as f:
                     assert proc.stdout is not None
                     while True:
+                        if asyncio.get_event_loop().time() - start_time > 1800:
+                            proc.terminate()
+                            self.append_terminal("[timeout] process exceeded 30 minutes and was terminated.\n")
+                            break
                         line = await proc.stdout.readline()
                         if not line:
                             break
@@ -2157,12 +2258,16 @@ class OverwatchApp(App):
             finally:
                 ended = now_utc()
                 write_metadata(run_dir, mode, action, command, cwd, exit_code, started, ended)
-                self._running_proc = None
-                self._running_task = None
+                if proc and proc in self._running_procs:
+                    self._running_procs.remove(proc)
+                task = asyncio.current_task()
+                if task in self._running_tasks:
+                    self._running_tasks.remove(task)
                 self.refresh_observe()
                 self.refresh_runs(preserve_selection=True)
 
-        self._running_task = asyncio.create_task(runner())
+        task = asyncio.create_task(runner())
+        self._running_tasks.append(task)
 
     def _event_tree(self, event):
         tree = getattr(event, "control", None)
@@ -2265,29 +2370,34 @@ class OverwatchApp(App):
             pass
 
     async def action_cancel(self) -> None:
-        if self._running_proc and self._running_task and not self._running_task.done():
-            try:
-                self._running_proc.terminate()
-                self.append_terminal("[cancel] terminated running process.\n")
-            except Exception:
-                self.append_terminal("[cancel] unable to terminate.\n")
+        if self._running_procs:
+            for proc in list(self._running_procs):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self.append_terminal("[cancel] terminated running process(es).\n")
 
     async def action_quit(self) -> None:
-        if self._running_proc and self._running_task and not self._running_task.done():
+        if self._running_procs:
             confirm = await self.push_screen(ConfirmScreen("A process is running. Quit and terminate it? Type yes:"))
             if confirm != "yes":
                 return
-            try:
-                self._running_proc.terminate()
-            except Exception:
-                pass
+            for proc in list(self._running_procs):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         await super().action_quit()
 
 app = OverwatchApp()
 app.run()
 PY
   "${PYTHON_CMD}" "${tmp}"
-  rm -f "${tmp}" 2>/dev/null || true
+  if [ -n "${OVERWATCH_TMP_DIR}" ]; then
+    rm -rf "${OVERWATCH_TMP_DIR}" 2>/dev/null || true
+    OVERWATCH_TMP_DIR=""
+  fi
 }
 
 main() {
