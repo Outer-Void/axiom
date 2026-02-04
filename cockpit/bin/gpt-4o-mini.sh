@@ -1,218 +1,131 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_PREFIX="[gpt-4o-mini]"
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+COCKPIT_DIR="$(cd -P -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
 
-log() {
-  printf "%s %s\n" "$LOG_PREFIX" "$*"
-}
+source "${COCKPIT_DIR}/core/constants.sh"
+source "${COCKPIT_DIR}/core/shell.sh"
+source "${COCKPIT_DIR}/core/log.sh"
+source "${COCKPIT_DIR}/core/platform.sh"
+source "${COCKPIT_DIR}/core/env.sh"
+source "${COCKPIT_DIR}/core/runs.sh"
 
-warn() {
-  printf "%s WARNING: %s\n" "$LOG_PREFIX" "$*" >&2
-}
-
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-COCKPIT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_DIR="${COCKPIT_DIR}/config"
+CONFIG_DIR="$(axiom_config_dir)"
 ENV_FILE="${CONFIG_DIR}/.env"
+ENV_EXAMPLE_FILE="${CONFIG_DIR}/.env.example"
 
-is_termux() {
-  [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux/files/usr" ]]
-}
+EXIT_OK=0
+EXIT_MISSING_DEP=10
+EXIT_CONFIG_ERROR=20
+EXIT_NETWORK_ERROR=30
 
-is_wsl() {
-  grep -qi microsoft /proc/version 2>/dev/null
-}
+JSON_MODE=0
+ONLY_TEST=0
 
-platform_name() {
-  local uname_s
-  uname_s="$(uname -s)"
-  case "$uname_s" in
-    Darwin) echo "macos" ;;
-    Linux)
-      if is_termux; then
-        echo "termux"
-      else
-        echo "linux"
-      fi
-      ;;
-    MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
-    *) echo "unknown" ;;
-  esac
-}
+RUN_DIR=""
+RUN_OUTPUT_TEXT=""
+RUN_HTTP_CODE=""
+RUN_LATENCY_MS=""
+STARTED_AT=""
+COMMAND_LINE=""
 
-ensure_env_file() {
-  mkdir -p "$CONFIG_DIR"
-  if [[ ! -f "$ENV_FILE" ]]; then
-    if [[ -f "${CONFIG_DIR}/.env.example" ]]; then
-      cp "${CONFIG_DIR}/.env.example" "$ENV_FILE"
-      log "Created config from .env.example."
-    else
-      {
-        echo "# OpenAI configuration"
-        echo "# OPENAI_API_KEY="
-        echo "# OPENAI_MODEL=gpt-4o-mini"
-        echo "# OPENAI_BASE_URL=https://api.openai.com/v1"
-        echo "# OPENAI_TIMEOUT=60"
-        echo "# OPENAI_MAX_OUTPUT_TOKENS=500"
-      } > "$ENV_FILE"
-      log "Created new config file."
-    fi
+log_info() {
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    axiom_log_info "$@"
   fi
+}
 
-  if chmod 600 "$ENV_FILE" 2>/dev/null; then
-    :
+log_warn() {
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    axiom_log_warn "$@"
+  fi
+}
+
+log_error() {
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    axiom_log_error "$@"
+  fi
+}
+
+now_ms() {
+  local ms
+  ms="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "$ms" =~ ^[0-9]{13,}$ ]]; then
+    printf '%s\n' "$ms"
   else
-    warn "Unable to set permissions on ${ENV_FILE}."
+    ms="$(date +%s)"
+    printf '%s\n' "$((ms * 1000))"
   fi
 }
 
-strip_quotes() {
-  local value="$1"
-  if [[ "$value" =~ ^\".*\"$ ]]; then
-    value="${value:1:${#value}-2}"
-  elif [[ "$value" =~ ^\'.*\'$ ]]; then
-    value="${value:1:${#value}-2}"
+json_escape() {
+  axiom_runs_json_escape "$1"
+}
+
+emit_json_success() {
+  local http_code latency_ms
+  http_code="${RUN_HTTP_CODE:-0}"
+  latency_ms="${RUN_LATENCY_MS:-0}"
+  if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+    http_code=0
   fi
-  printf "%s" "$value"
+  if ! [[ "$latency_ms" =~ ^[0-9]+$ ]]; then
+    latency_ms=0
+  fi
+  printf '{"ok":true,"model":"%s","base_url":"%s","latency_ms":%s,"http_code":%s}\n' \
+    "$(json_escape "${OPENAI_MODEL:-gpt-4o-mini}")" \
+    "$(json_escape "${OPENAI_BASE_URL:-https://api.openai.com/v1}")" \
+    "$latency_ms" \
+    "$http_code"
 }
 
-read_env() {
-  local line key value
-  OPENAI_API_KEY=""
-  OPENAI_MODEL=""
-  OPENAI_BASE_URL=""
-  OPENAI_TIMEOUT=""
-  OPENAI_MAX_OUTPUT_TOKENS=""
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      value="${BASH_REMATCH[2]}"
-      if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
-        value="$(strip_quotes "$value")"
-      else
-        value="$(strip_quotes "$value")"
-        value="${value%%#*}"
-        value="${value%"${value##*[![:space:]]}"}"
-      fi
-      case "$key" in
-        OPENAI_API_KEY) OPENAI_API_KEY="$value" ;;
-        OPENAI_MODEL) OPENAI_MODEL="$value" ;;
-        OPENAI_BASE_URL) OPENAI_BASE_URL="$value" ;;
-        OPENAI_TIMEOUT) OPENAI_TIMEOUT="$value" ;;
-        OPENAI_MAX_OUTPUT_TOKENS) OPENAI_MAX_OUTPUT_TOKENS="$value" ;;
-        *) : ;;
-      esac
-    fi
-  done < "$ENV_FILE"
+emit_json_error() {
+  local error_message="$1"
+  local http_code
+  http_code="${RUN_HTTP_CODE:-0}"
+  if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+    http_code=0
+  fi
+  printf '{"ok":false,"error":"%s","http_code":%s}\n' \
+    "$(json_escape "$error_message")" \
+    "$http_code"
 }
 
-update_env_key() {
-  local key="$1"
-  local value="$2"
-  local file="$3"
-  local tmp
-  if grep -qE "^[[:space:]]*${key}=" "$file"; then
-    tmp="$(mktemp)"
-    awk -v k="$key" -v v="$value" 'BEGIN{done=0}
-      $0 ~ "^[[:space:]]*"k"=" {
-        print k"="v
-        done=1
-        next
-      }
-      {print}
-      END{}
-    ' "$file" > "$tmp"
-    mv "$tmp" "$file"
-  else
-    printf "%s=%s\n" "$key" "$value" >> "$file"
+write_run_metadata() {
+  local exit_code="$1"
+  local ended_at
+  ended_at="$(axiom_now_utc)"
+  if [[ -n "$RUN_DIR" ]]; then
+    axiom_runs_write_metadata "$RUN_DIR" "ai" "gpt-4o-mini" "$COMMAND_LINE" "$exit_code" "$STARTED_AT" "$ended_at"
   fi
 }
 
-ensure_defaults() {
-  local updated=0
-  if [[ -z "$OPENAI_MODEL" ]]; then
-    OPENAI_MODEL="gpt-4o-mini"
-    update_env_key "OPENAI_MODEL" "$OPENAI_MODEL" "$ENV_FILE"
-    updated=1
-  fi
-  if [[ -z "$OPENAI_BASE_URL" ]]; then
-    OPENAI_BASE_URL="https://api.openai.com/v1"
-    update_env_key "OPENAI_BASE_URL" "$OPENAI_BASE_URL" "$ENV_FILE"
-    updated=1
-  fi
-  if [[ -z "$OPENAI_TIMEOUT" ]]; then
-    OPENAI_TIMEOUT="60"
-    update_env_key "OPENAI_TIMEOUT" "$OPENAI_TIMEOUT" "$ENV_FILE"
-    updated=1
-  fi
-  if [[ -z "$OPENAI_MAX_OUTPUT_TOKENS" ]]; then
-    OPENAI_MAX_OUTPUT_TOKENS="500"
-    update_env_key "OPENAI_MAX_OUTPUT_TOKENS" "$OPENAI_MAX_OUTPUT_TOKENS" "$ENV_FILE"
-    updated=1
-  fi
-  if [[ "$updated" -eq 1 ]]; then
-    log "Updated config defaults in ${ENV_FILE}."
-  fi
+on_exit() {
+  local exit_code=$?
+  write_run_metadata "$exit_code"
 }
 
-ensure_api_key() {
-  if [[ -n "$OPENAI_API_KEY" ]]; then
-    return 0
-  fi
-
-  log "OPENAI_API_KEY is missing."
-  printf "%s Enter OpenAI API key (input hidden): " "$LOG_PREFIX"
-  read -r -s api_key_input
-  printf "\n"
-  if [[ -z "$api_key_input" ]]; then
-    warn "No API key entered."
-    return 1
-  fi
-
-  local save_answer
-  printf "%s Save key to %s? [Y/n]: " "$LOG_PREFIX" "$ENV_FILE"
-  read -r save_answer
-  save_answer="${save_answer:-Y}"
-  if [[ "$save_answer" =~ ^[Yy]$ ]]; then
-    update_env_key "OPENAI_API_KEY" "$api_key_input" "$ENV_FILE"
-    if chmod 600 "$ENV_FILE" 2>/dev/null; then
-      :
-    else
-      warn "Unable to set permissions on ${ENV_FILE}."
-    fi
-    log "Saved API key to config."
-  else
-    log "Using API key for this session only."
-  fi
-  OPENAI_API_KEY="$api_key_input"
-}
-
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
+trap on_exit EXIT
 
 install_packages() {
   local platform
-  platform="$(platform_name)"
+  platform="$(axiom_detect_platform)"
 
   local missing=()
   for dep in curl jq; do
-    if ! command_exists "$dep"; then
+    if ! axiom_command_exists "$dep"; then
       missing+=("$dep")
     fi
   done
   if [[ ${#missing[@]} -eq 0 ]]; then
-    if command_exists "update-ca-certificates" || command_exists "trust" || [[ "$platform" == "macos" ]]; then
+    if axiom_command_exists "update-ca-certificates" || axiom_command_exists "trust" || [[ "$platform" == "macos" ]]; then
       :
     fi
     return 0
   fi
 
-  log "Installing dependencies: ${missing[*]}"
+  log_info "Installing dependencies: ${missing[*]}"
 
   case "$platform" in
     termux)
@@ -220,68 +133,95 @@ install_packages() {
       pkg install -y curl jq ca-certificates
       ;;
     linux)
-      if command_exists apt-get; then
+      if axiom_command_exists apt-get; then
         sudo apt-get update
         sudo apt-get install -y curl jq ca-certificates
-      elif command_exists dnf; then
+      elif axiom_command_exists dnf; then
         sudo dnf install -y curl jq ca-certificates
-      elif command_exists yum; then
+      elif axiom_command_exists yum; then
         sudo yum install -y curl jq ca-certificates
-      elif command_exists pacman; then
+      elif axiom_command_exists pacman; then
         sudo pacman -Sy --noconfirm curl jq ca-certificates
-      elif command_exists zypper; then
+      elif axiom_command_exists zypper; then
         sudo zypper install -y curl jq ca-certificates
       else
-        warn "No supported package manager found. Please install: curl jq ca-certificates."
+        log_warn "No supported package manager found. Please install: curl jq ca-certificates."
       fi
       ;;
     macos)
-      if command_exists brew; then
+      if axiom_command_exists brew; then
         brew install curl jq
       else
-        warn "Homebrew not found. Please install: curl jq (and ensure ca-certificates are present)."
+        log_warn "Homebrew not found. Please install: curl jq (and ensure ca-certificates are present)."
       fi
       ;;
     windows)
-      if command_exists winget; then
-        winget install --silent --accept-source-agreements --accept-package-agreements curl || warn "winget install failed"
-        winget install --silent --accept-source-agreements --accept-package-agreements jq || warn "winget install failed"
-      elif command_exists choco; then
-        choco install -y curl jq || warn "choco install failed"
+      if axiom_command_exists winget; then
+        winget install --silent --accept-source-agreements --accept-package-agreements curl || log_warn "winget install failed"
+        winget install --silent --accept-source-agreements --accept-package-agreements jq || log_warn "winget install failed"
+      elif axiom_command_exists choco; then
+        choco install -y curl jq || log_warn "choco install failed"
       else
-        warn "No Windows package manager detected. Please install curl and jq manually."
+        log_warn "No Windows package manager detected. Please install curl and jq manually."
       fi
       ;;
     *)
-      warn "Unknown platform. Please install: curl jq ca-certificates."
+      log_warn "Unknown platform. Please install: curl jq ca-certificates."
       ;;
   esac
 }
 
+require_dependencies() {
+  local dep
+  for dep in curl jq; do
+    if ! axiom_command_exists "$dep"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+ensure_api_key() {
+  local api_key_input=""
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    return 0
+  fi
+
+  if ! axiom_is_tty_stdin; then
+    return 1
+  fi
+
+  log_info "OPENAI_API_KEY is missing."
+  printf "%s Enter OpenAI API key (input hidden): " "[gpt-4o-mini]"
+  read -r -s api_key_input
+  printf "\n"
+  if [[ -z "$api_key_input" ]]; then
+    log_warn "No API key entered."
+    return 1
+  fi
+
+  OPENAI_API_KEY="$api_key_input"
+  return 0
+}
+
 run_test() {
-  local base_url="$OPENAI_BASE_URL"
-  local model="$OPENAI_MODEL"
-  local timeout="$OPENAI_TIMEOUT"
+  local base_url model timeout payload
+  local max_output_tokens resp_file http_code output_text
+  local start_ms end_ms latency_ms
 
-  if [[ -z "$base_url" ]]; then
-    base_url="https://api.openai.com/v1"
-  fi
-  if [[ -z "$model" ]]; then
-    model="gpt-4o-mini"
-  fi
-  if [[ -z "$timeout" ]]; then
-    timeout="60"
-  fi
+  base_url="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+  model="${OPENAI_MODEL:-gpt-4o-mini}"
+  timeout="${OPENAI_TIMEOUT:-60}"
+  max_output_tokens="${OPENAI_MAX_OUTPUT_TOKENS:-500}"
 
-  local payload
-  local max_output_tokens="${OPENAI_MAX_OUTPUT_TOKENS:-500}"
   if ! [[ "$max_output_tokens" =~ ^[0-9]+$ ]]; then
     max_output_tokens=500
   fi
+
   payload="$(jq -n --arg model "$model" --arg input "Say 'ok' and nothing else." --argjson max_output_tokens "$max_output_tokens" '{model:$model,input:$input,max_output_tokens:$max_output_tokens}')"
 
-  local resp_file http_code output_text
-  resp_file="$(mktemp)"
+  resp_file="$(axiom_mktemp)"
+  start_ms="$(now_ms)"
   http_code="$(curl -sS --max-time "$timeout" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${OPENAI_API_KEY}" \
@@ -289,81 +229,159 @@ run_test() {
     -w "%{http_code}" \
     "${base_url}/responses" \
     -d "$payload" || true)"
+  end_ms="$(now_ms)"
+  latency_ms=$((end_ms - start_ms))
 
   output_text="$(jq -r '.output_text // .output[0].content[0].text // empty' "$resp_file" 2>/dev/null || true)"
 
   rm -f "$resp_file"
 
+  RUN_HTTP_CODE="$http_code"
+  RUN_LATENCY_MS="$latency_ms"
+  RUN_OUTPUT_TEXT="$output_text"
+
   if [[ "$http_code" == "200" && -n "$output_text" ]]; then
-    log "Connectivity test passed."
     return 0
   fi
 
-  warn "Connectivity test failed (HTTP ${http_code:-unknown})."
-  if [[ -z "$OPENAI_API_KEY" ]]; then
-    warn "API key is missing."
-  fi
-  if [[ "$http_code" == "401" ]]; then
-    warn "Unauthorized. Check OPENAI_API_KEY in ${ENV_FILE}."
-  elif [[ "$http_code" == "404" ]]; then
-    warn "Endpoint not found. Check OPENAI_BASE_URL (${base_url})."
-  elif [[ "$http_code" == "429" ]]; then
-    warn "Rate limited. Wait and try again or check account limits."
-  elif [[ "$http_code" == "0" || -z "$http_code" ]]; then
-    warn "Network error. Check connectivity and proxy settings."
-  else
-    warn "Unexpected response. Verify OPENAI_MODEL (${model}) and OPENAI_BASE_URL (${base_url})."
-  fi
   return 1
 }
 
 print_usage() {
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    return 0
+  fi
+
   cat <<USAGE
-${LOG_PREFIX} How to use
-${LOG_PREFIX} Config file: ${ENV_FILE}
-${LOG_PREFIX} Re-run test: ${SCRIPT_DIR}/gpt-4o-mini.sh --test
-${LOG_PREFIX} Example:
-${LOG_PREFIX}   (set -a; \
-${LOG_PREFIX}    while IFS= read -r line; do \
-${LOG_PREFIX}      case "$line" in \
-${LOG_PREFIX}        ''|\#*) continue ;; \
-${LOG_PREFIX}        OPENAI_API_KEY=*|OPENAI_MODEL=*|OPENAI_BASE_URL=*|OPENAI_TIMEOUT=*|OPENAI_MAX_OUTPUT_TOKENS=*) export "$line" ;; \
-${LOG_PREFIX}      esac; \
-${LOG_PREFIX}    done < "${ENV_FILE}"; \
-${LOG_PREFIX}    set +a; \
-${LOG_PREFIX}    curl -sS -H "Content-Type: application/json" \
-${LOG_PREFIX}      -H "Authorization: Bearer \${OPENAI_API_KEY}" \
-${LOG_PREFIX}      \"\${OPENAI_BASE_URL:-https://api.openai.com/v1}/responses\" \
-${LOG_PREFIX}      -d "{\"model\":\"\${OPENAI_MODEL:-gpt-4o-mini}\",\"input\":\"Hello\"}" | jq -r '.output_text // .output[0].content[0].text')
+[gpt-4o-mini] How to use
+[gpt-4o-mini] Config file: ${ENV_FILE}
+[gpt-4o-mini] Re-run test: ${SCRIPT_DIR}/gpt-4o-mini.sh --test
+[gpt-4o-mini] Example:
+[gpt-4o-mini]   (set -a; \
+[gpt-4o-mini]    while IFS= read -r line; do \
+[gpt-4o-mini]      case "\${line}" in \
+[gpt-4o-mini]        ''|\#*) continue ;; \
+[gpt-4o-mini]        OPENAI_API_KEY=*|OPENAI_MODEL=*|OPENAI_BASE_URL=*|OPENAI_TIMEOUT=*|OPENAI_MAX_OUTPUT_TOKENS=*) export "\${line}" ;; \
+[gpt-4o-mini]      esac; \
+[gpt-4o-mini]    done < "${ENV_FILE}"; \
+[gpt-4o-mini]    set +a; \
+[gpt-4o-mini]    curl -sS -H "Content-Type: application/json" \
+[gpt-4o-mini]      -H "Authorization: Bearer \${OPENAI_API_KEY}" \
+[gpt-4o-mini]      "\${OPENAI_BASE_URL:-https://api.openai.com/v1}/responses" \
+[gpt-4o-mini]      -d "{\"model\":\"\${OPENAI_MODEL:-gpt-4o-mini}\",\"input\":\"Hello\"}" | jq -r '.output_text // .output[0].content[0].text')
 USAGE
 }
 
 main() {
-  local only_test=0
-  if [[ "${1:-}" == "--test" ]]; then
-    only_test=1
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --test)
+        ONLY_TEST=1
+        ;;
+      --json)
+        JSON_MODE=1
+        ;;
+      --help|-h)
+        print_usage
+        return 0
+        ;;
+    esac
+  done
+
+  COMMAND_LINE="$0 $*"
+  STARTED_AT="$(axiom_now_utc)"
+  RUN_DIR="$(axiom_runs_create_dir "ai" "gpt-4o-mini")"
+
+  axiom_ensure_env_file "$ENV_FILE" "$ENV_EXAMPLE_FILE"
+  axiom_load_env_file "$ENV_FILE"
+
+  OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+  OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
+  OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+  OPENAI_TIMEOUT="${OPENAI_TIMEOUT:-60}"
+  OPENAI_MAX_OUTPUT_TOKENS="${OPENAI_MAX_OUTPUT_TOKENS:-500}"
+
+  if [[ "$ONLY_TEST" -eq 0 ]]; then
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      install_packages >&2
+    else
+      install_packages
+    fi
   fi
 
-  ensure_env_file
-  read_env
-  ensure_defaults
-
-  if [[ "$only_test" -eq 0 ]]; then
-    install_packages
+  if ! require_dependencies; then
+    log_error "Missing dependencies: curl and jq are required."
+    axiom_runs_write_output "$RUN_DIR" "Error: Missing dependencies: curl and jq are required."
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      emit_json_error "Missing dependencies: curl and jq are required."
+    fi
+    return "$EXIT_MISSING_DEP"
   fi
 
   if ! ensure_api_key; then
-    warn "Cannot proceed without API key."
-    print_usage
-    return 1
+    log_error "OPENAI_API_KEY is missing."
+    axiom_runs_write_output "$RUN_DIR" "Error: OPENAI_API_KEY is missing."
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      emit_json_error "OPENAI_API_KEY is missing."
+    else
+      print_usage
+    fi
+    return "$EXIT_CONFIG_ERROR"
   fi
 
   if run_test; then
-    print_usage
-  else
-    print_usage
-    return 1
+    if [[ -n "$RUN_OUTPUT_TEXT" ]]; then
+      axiom_runs_log_ai "$RUN_OUTPUT_TEXT"
+      axiom_runs_write_output "$RUN_DIR" "$RUN_OUTPUT_TEXT"
+    fi
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      emit_json_success
+    else
+      log_info "Connectivity test passed."
+      print_usage
+    fi
+    return "$EXIT_OK"
   fi
+
+  if [[ -n "$RUN_OUTPUT_TEXT" ]]; then
+    axiom_runs_log_ai "$RUN_OUTPUT_TEXT"
+    axiom_runs_write_output "$RUN_DIR" "$RUN_OUTPUT_TEXT"
+  fi
+
+  local error_message
+  case "${RUN_HTTP_CODE:-}" in
+    401)
+      error_message="Unauthorized. Check OPENAI_API_KEY in ${ENV_FILE}."
+      ;;
+    404)
+      error_message="Endpoint not found. Check OPENAI_BASE_URL (${OPENAI_BASE_URL})."
+      ;;
+    429)
+      error_message="Rate limited. Wait and try again or check account limits."
+      ;;
+    0|"")
+      error_message="Network error. Check connectivity and proxy settings."
+      ;;
+    *)
+      error_message="Unexpected response. Verify OPENAI_MODEL (${OPENAI_MODEL}) and OPENAI_BASE_URL (${OPENAI_BASE_URL})."
+      ;;
+  esac
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    emit_json_error "$error_message"
+  else
+    log_warn "Connectivity test failed (HTTP ${RUN_HTTP_CODE:-unknown})."
+    log_warn "$error_message"
+    print_usage
+  fi
+  axiom_runs_write_output "$RUN_DIR" "Error: $error_message"
+
+  if [[ "${RUN_HTTP_CODE:-}" == "401" ]]; then
+    return "$EXIT_CONFIG_ERROR"
+  fi
+
+  return "$EXIT_NETWORK_ERROR"
 }
 
 main "$@"
