@@ -557,7 +557,7 @@ def shorten_path(path: Path, max_len: int = 28) -> str:
 from dataclasses import dataclass, field
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
@@ -579,6 +579,21 @@ PANEL2 = "#191b1f"
 BORDER = "#2b2f34"
 TEXT = "#c7cbd1"
 TEXT_DIM = "#9aa3ad"
+
+TOOL_DESCRIPTIONS = {
+    "orbitscan.sh": "Repo overview snapshot: git status/branch, top size offenders, common env/cache markers.",
+    "voidveil.sh": "Idempotently appends standard ignore rules to .gitignore.",
+    "nebula_boot.sh": "Creates/refreshes Python .venv, upgrades pip, installs requirements.txt if present.",
+    "chronos_probe.sh": "Environment fingerprint (OS/arch/shell/python/git/package manager) for Termux/proot/native parity.",
+    "riftfreeze.sh": "Dependency drift detector: write baseline.txt and diff against current.txt.",
+    "license_lens.sh": "Generates a dependency license report using pip-licenses (installs it if missing).",
+    "starmap.sh": "Prints a filtered repo tree (uses tree, falls back to find).",
+    "gravgrep.sh": "Fast recursive search for imports/refs (prefers rg, falls back to grep).",
+    "warpdrive.sh": "Universal task runner wrapper: test/lint/run, auto-uses local .venv when present.",
+    "artifact_compress.sh": "Builds a clean zip artifact excluding common caches/env/build outputs.",
+    "pulsecheck.sh": "Quick system resource snapshot (CPU/memory/disk).",
+    "admlog.sh": "Creates an ADR-lite decision log entry under docs/decisions/.",
+}
 
 @dataclass
 class FileNode:
@@ -652,9 +667,15 @@ class FilesPane(Static):
 class OperatePane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Locker Tools")
-        yield ListView(id="operate-list")
-        yield Input(placeholder="Arguments", id="operate-args")
-        yield TextArea(id="operate-preview", read_only=True)
+        with Horizontal(id="operate-columns"):
+            with Vertical(id="operate-left"):
+                yield ListView(id="operate-list")
+                yield Input(placeholder="Arguments", id="operate-args")
+                yield TextArea(id="operate-preview", read_only=True)
+            with Vertical(id="operate-right"):
+                yield Label("Tool Intel", id="operate-desc-heading")
+                yield Label("", id="operate-desc-title")
+                yield TextArea(id="operate-desc", read_only=True)
 
 class TerminalInfoPane(Static):
     def compose(self) -> ComposeResult:
@@ -822,6 +843,41 @@ class OverwatchApp(App):
     #operate-preview {{
         border: solid {BORDER};
     }}
+    #operate-columns {{
+        layout: horizontal;
+        height: 1fr;
+    }}
+    #operate-left {{
+        width: 1fr;
+        min-width: 28;
+    }}
+    #operate-right {{
+        width: 40%;
+        min-width: 26;
+        max-width: 50%;
+    }}
+    #operate-desc-heading {{
+        color: {ACCENT_DIM};
+    }}
+    #operate-desc-title {{
+        color: {ACCENT};
+    }}
+    #operate-desc {{
+        border: solid {BORDER};
+        background: {PANEL2};
+        height: 1fr;
+    }}
+    #operate-pane.narrow #operate-columns {{
+        layout: vertical;
+    }}
+    #operate-pane.narrow #operate-right {{
+        width: 1fr;
+        max-width: 100%;
+    }}
+    #operate-pane.narrow #operate-desc {{
+        height: 8;
+        min-height: 6;
+    }}
     """
 
     BINDINGS = [
@@ -853,7 +909,6 @@ class OverwatchApp(App):
         self._running_task: Optional[asyncio.Task] = None
         self.nav_map = ["Observe", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
         self._observe_filter = ""
-        self._locker_desc = {}
         self._files_fallback_roots: list["FileNode"] = []
         self._files_fallback_visible: list["FileNode"] = []
         self._ai_buffer = ""
@@ -900,7 +955,6 @@ class OverwatchApp(App):
         self.switch_mode("Observe")
         self.refresh_all()
         nav.focus()
-        self._locker_desc = self.load_locker_descriptions()
         self.set_responsive_state(self.size.width)
         self.update_terminal_help()
 
@@ -929,14 +983,17 @@ class OverwatchApp(App):
         body = self.query_one("#body", Container)
         right = self.query_one("#right", TerminalPane)
         left = self.query_one("#left", Vertical)
+        operate = self.query_one("#operate-pane", OperatePane)
         if self.is_narrow:
             body.add_class("narrow")
             right.add_class("narrow")
             left.add_class("narrow")
+            operate.add_class("narrow")
         else:
             body.remove_class("narrow")
             right.remove_class("narrow")
             left.remove_class("narrow")
+            operate.remove_class("narrow")
         right.display = (not self.is_narrow) or self.terminal_visible
         if right.display:
             right.refresh()
@@ -1298,19 +1355,25 @@ class OverwatchApp(App):
         lv = self.query_one("#operate-list", ListView)
         lv.clear()
         preview = self.query_one("#operate-preview", TextArea)
+        desc_title = self.query_one("#operate-desc-title", Label)
+        desc_body = self.query_one("#operate-desc", TextArea)
         if not LOCKER_DIR.exists():
             lv.append(NavItem("No locker directory.", tag="__empty__"))
             preview.text = f"LOCKER_DIR not found: {LOCKER_DIR}\n"
+            desc_title.update("No tool selected")
+            desc_body.text = "No description available."
             return
         tools = sorted([p for p in LOCKER_DIR.glob("*.sh") if p.is_file()], key=lambda p: p.name.lower())
         if not tools:
             lv.append(NavItem("No tools found.", tag="__empty__"))
             preview.text = "No *.sh tools found in locker.\n"
+            desc_title.update("No tool selected")
+            desc_body.text = "No description available."
             return
         for t in tools:
             lv.append(NavItem(t.name, tag=str(t)))
         lv.index = 0
-        preview.text = "Select a tool, add args, press Enter to run (with confirmation).\n"
+        self.update_operate_tool_info(tools[0])
 
     def refresh_config(self) -> None:
         env_path = ENV_FILE
@@ -1409,21 +1472,30 @@ class OverwatchApp(App):
                 pass
             write_metadata(run_dir, "ai", "ping", "openai.responses", self.cwd, exit_code, started, now_utc())
 
-    def load_locker_descriptions(self) -> dict:
-        desc = {}
-        readme = LOCKER_DIR / "README.md"
-        if not readme.exists():
-            return desc
-        try:
-            for line in readme.read_text(errors="ignore").splitlines():
-                if ":" in line and ".sh" in line:
-                    parts = line.split(":", 1)
-                    name = parts[0].strip().lstrip("-* ").strip()
-                    if name.endswith(".sh"):
-                        desc[name] = parts[1].strip()
-        except Exception:
-            return desc
-        return desc
+    def update_operate_tool_info(self, tool: Optional[Path]) -> None:
+        preview = self.query_one("#operate-preview", TextArea)
+        desc_title = self.query_one("#operate-desc-title", Label)
+        desc_body = self.query_one("#operate-desc", TextArea)
+        if tool is None:
+            preview.text = "Select a tool, add args, press Enter to run (with confirmation).\n"
+            desc_title.update("No tool selected")
+            desc_body.text = "No description available."
+            return
+        tool_name = tool.name
+        desc_title.update(tool_name)
+        desc_body.text = TOOL_DESCRIPTIONS.get(tool_name, "No description available.")
+        args = self.query_one("#operate-args", Input).value.strip()
+        cmd = f"{tool} {args}".strip()
+        preview.text = f"CWD: {self.cwd}\nPreview: {cmd}\n"
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view.id != "operate-list":
+            return
+        item = event.item
+        if not isinstance(item, NavItem) or item.tag == "__empty__":
+            self.update_operate_tool_info(None)
+            return
+        self.update_operate_tool_info(Path(item.tag))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id == "nav":
@@ -1438,13 +1510,9 @@ class OverwatchApp(App):
         elif event.list_view.id == "operate-list":
             item = event.item
             if not isinstance(item, NavItem) or item.tag == "__empty__":
+                self.update_operate_tool_info(None)
                 return
-            tool = Path(item.tag)
-            args = self.query_one("#operate-args", Input).value.strip()
-            cmd = f"{tool} {args}".strip()
-            desc = self._locker_desc.get(tool.name, "")
-            extra = f"\nDesc: {desc}\n" if desc else "\n"
-            self.query_one("#operate-preview", TextArea).text = f"CWD: {self.cwd}\nPreview: {cmd}{extra}"
+            self.update_operate_tool_info(Path(item.tag))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "files-path":
