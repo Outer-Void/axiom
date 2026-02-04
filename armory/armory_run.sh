@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
-ARMORY_RUN_BIN="$REPO_DIR/armory/core/bin/armory-run"
+ARMORY_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+ARMORY_RUN_BIN="$ARMORY_DIR/core/bin/armory-run"
 
 usage() {
   cat <<'USAGE'

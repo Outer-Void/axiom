@@ -34,19 +34,34 @@ LAST_REQUEST_FILE=""
 
 log_info() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
-    axiom_log_info "$@"
+    local msg
+    msg="$(redact_api_key_text "$*")"
+    if [[ "${CI:-}" == "true" && "$msg" == *"OPENAI_API_KEY"* ]]; then
+      return 0
+    fi
+    axiom_log_info "$msg"
   fi
 }
 
 log_warn() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
-    axiom_log_warn "$@"
+    local msg
+    msg="$(redact_api_key_text "$*")"
+    if [[ "${CI:-}" == "true" && "$msg" == *"OPENAI_API_KEY"* ]]; then
+      return 0
+    fi
+    axiom_log_warn "$msg"
   fi
 }
 
 log_error() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
-    axiom_log_error "$@"
+    local msg
+    msg="$(redact_api_key_text "$*")"
+    if [[ "${CI:-}" == "true" && "$msg" == *"OPENAI_API_KEY"* ]]; then
+      return 0
+    fi
+    axiom_log_error "$msg"
   fi
 }
 
@@ -271,6 +286,12 @@ ensure_api_key() {
   if [[ -n "${OPENAI_API_KEY:-}" ]]; then
     return 0
   fi
+  if [[ -n "${OPENAI_NETRC:-}" && -r "${OPENAI_NETRC}" ]]; then
+    return 0
+  fi
+  if [[ -r "${HOME}/.netrc" ]]; then
+    return 0
+  fi
 
   if ! axiom_is_tty_stdin; then
     return 1
@@ -310,6 +331,7 @@ run_test() {
   if [[ "$JSON_MODE" -eq 0 ]]; then
     if [[ "$max_output_tokens" -gt 2000 || "${#payload}" -gt 8000 ]]; then
       log_warn "Large request payload detected; this may increase costs."
+      log_warn "Check your OpenAI usage dashboard for current pricing and limits."
     fi
   fi
 
@@ -377,6 +399,7 @@ print_usage() {
 [gpt-4o-mini] How to use
 [gpt-4o-mini] Config file: ${ENV_FILE}
 [gpt-4o-mini] Re-run test: ${SCRIPT_DIR}/gpt-4o-mini.sh --test
+[gpt-4o-mini] Optional: ${SCRIPT_DIR}/gpt-4o-mini.sh --netrc ~/.netrc
 [gpt-4o-mini] Example:
 [gpt-4o-mini]   (set -a; \
 [gpt-4o-mini]    while IFS= read -r line; do \
@@ -394,23 +417,37 @@ USAGE
 }
 
 main() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
+  local original_args=("$@")
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
       --test)
         ONLY_TEST=1
+        shift
+        ;;
+      --netrc)
+        shift
+        if [[ -z "${1:-}" ]]; then
+          log_warn "--netrc requires a path"
+          return "$EXIT_CONFIG_ERROR"
+        fi
+        OPENAI_NETRC="$1"
+        shift
         ;;
       --json)
         JSON_MODE=1
+        shift
         ;;
       --help|-h)
         print_usage
         return 0
         ;;
+      *)
+        shift
+        ;;
     esac
   done
 
-  COMMAND_LINE="$0 $*"
+  COMMAND_LINE="$0 ${original_args[*]}"
   STARTED_AT="$(axiom_now_utc)"
   RUN_DIR="$(axiom_runs_create_dir "ai" "gpt-4o-mini")"
 
