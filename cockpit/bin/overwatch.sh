@@ -560,7 +560,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Input, Label, ListItem, ListView, Static, TextArea
+from textual.widgets import Button, Footer, Input, Label, ListItem, ListView, Static, TextArea
 try:
     from textual.widgets import Tree
     TREE_AVAILABLE = True
@@ -652,6 +652,19 @@ class ObservePane(Static):
         yield ListView(id="observe-list")
         yield TextArea(id="observe-output", read_only=True)
 
+class RunsPane(Static):
+    def compose(self) -> ComposeResult:
+        yield Label("Runs (cockpit/runs)")
+        with Horizontal(id="runs-columns"):
+            with Vertical(id="runs-left"):
+                yield Input(placeholder="Filter runs...", id="runs-filter")
+                yield ListView(id="runs-list")
+            with Vertical(id="runs-right"):
+                yield Label("Run Files", id="runs-files-label")
+                yield ListView(id="runs-files")
+                yield Label("Viewer (tail: off)", id="runs-tail-label")
+                yield TextArea(id="runs-viewer", read_only=True)
+
 class FilesPane(Static):
     def compose(self) -> ComposeResult:
         yield Label("Filesystem Navigator")
@@ -714,7 +727,7 @@ class AboutPane(Static):
             "Mission: Spaceship-grade terminal cockpit for cross-platform ops (Termux, Debian/WSL, Linux, macOS).\n"
             "\n"
             "Keys: Enter expand/collapse or preview | M move CWD | P preview | R refresh\n"
-            "Keys: / search | Tab cycle panes | T toggle terminal (narrow) | Q quit\n",
+            "Keys: / search | Tab cycle panes | T tail in Runs (terminal toggle in other modes) | Q quit\n",
             read_only=True,
         )
 
@@ -740,6 +753,25 @@ class OverwatchApp(App):
         padding: 1 2;
         border: solid {BORDER};
         overflow-x: hidden;
+    }}
+    #ai-bar {{
+        background: #1b1d20;
+        color: {TEXT};
+        padding: 0 1;
+        border: solid {ACCENT_DIM};
+        height: 3;
+    }}
+    #ai-bar Button {{
+        background: {PANEL2};
+        color: {TEXT};
+        border: solid {ACCENT_DIM};
+        margin: 0 1 0 0;
+        height: 1;
+        padding: 0 1;
+    }}
+    #ai-bar Button:hover {{
+        border: solid {ACCENT};
+        color: {ACCENT};
     }}
     #ai-window {{
         dock: top;
@@ -870,6 +902,48 @@ class OverwatchApp(App):
         background: {PANEL};
         height: 1fr;
     }}
+    #runs-columns {{
+        layout: horizontal;
+        height: 1fr;
+    }}
+    #runs-columns.narrow {{
+        layout: vertical;
+    }}
+    #runs-left {{
+        width: 1fr;
+        min-width: 26;
+    }}
+    #runs-right {{
+        width: 45%;
+        min-width: 28;
+        max-width: 55%;
+        border: solid {ACCENT_DIM};
+        background: {PANEL2};
+        padding: 1 1;
+    }}
+    #runs-right.narrow {{
+        width: 1fr;
+        max-width: 100%;
+    }}
+    #runs-filter {{
+        border: solid {BORDER};
+        background: #111214;
+    }}
+    #runs-list {{
+        border: solid {BORDER};
+        height: 1fr;
+    }}
+    #runs-files {{
+        border: solid {BORDER};
+        height: 8;
+    }}
+    #runs-tail-label {{
+        color: {ACCENT_DIM};
+    }}
+    #runs-viewer {{
+        border: solid {BORDER};
+        height: 1fr;
+    }}
     """
 
     BINDINGS = [
@@ -877,7 +951,7 @@ class OverwatchApp(App):
         Binding("escape", "back", "Back"),
         Binding("tab", "focus_next", "Next Pane"),
         Binding("/", "search", "Search"),
-        Binding("t", "toggle_terminal", "Terminal"),
+        Binding("t", "toggle_terminal", "Terminal/Tail"),
         Binding("enter", "enter", "Enter"),
         Binding("m", "move_cwd", "Move"),
         Binding("p", "preview", "Preview"),
@@ -901,8 +975,12 @@ class OverwatchApp(App):
         super().__init__()
         self._running_proc: Optional[asyncio.subprocess.Process] = None
         self._running_task: Optional[asyncio.Task] = None
-        self.nav_map = ["Observe", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
+        self.nav_map = ["Observe", "Runs", "Files", "Operate", "Terminal", "Signal", "Config", "About"]
         self._observe_filter = ""
+        self._runs_filter = ""
+        self._runs_selected_name: Optional[str] = None
+        self._runs_selected_file: Optional[str] = None
+        self._runs_tail_enabled = False
         self._files_fallback_roots: list["FileNode"] = []
         self._files_fallback_visible: list["FileNode"] = []
         self._ai_buffer = ""
@@ -915,12 +993,18 @@ class OverwatchApp(App):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield StatusHeader(id="header")
+            with Horizontal(id="ai-bar"):
+                yield Button("Ping", id="ai-action-ping")
+                yield Button("Summarize", id="ai-action-summarize")
+                yield Button("Explain Error", id="ai-action-explain")
+                yield Button("Next Steps", id="ai-action-next")
             yield TextArea(id="ai-window", read_only=True)
             with Container(id="body"):
                 with Vertical(id="left"):
                     yield ListView(id="nav")
                     with Container(id="main"):
                         self.observe = ObservePane(id="observe-pane")
+                        self.runs = RunsPane(id="runs-pane")
                         self.files = FilesPane(id="files-pane")
                         self.operate = OperatePane(id="operate-pane")
                         self.terminal = TerminalInfoPane(id="terminal-pane")
@@ -928,6 +1012,7 @@ class OverwatchApp(App):
                         self.config = ConfigPane(id="config-pane")
                         self.about = AboutPane(id="about-pane")
                         yield self.observe
+                        yield self.runs
                         yield self.files
                         yield self.operate
                         yield self.terminal
@@ -951,6 +1036,8 @@ class OverwatchApp(App):
         nav.focus()
         self.set_responsive_state(self.size.width)
         self.update_terminal_help()
+        self.set_interval(2.0, self.refresh_runs_live)
+        self.set_interval(1.0, self.refresh_runs_tail)
 
     def update_terminal_help(self) -> None:
         info = self.query_one("#terminal-pane", TerminalInfoPane)
@@ -960,6 +1047,7 @@ class OverwatchApp(App):
             "CTRL+C cancels the active command.",
             "Esc returns focus to nav.",
             "Files: Enter expand/collapse | M move CWD | P preview.",
+            "Runs: T toggles tail mode; R refreshes.",
         ]
         if IS_TERMUX:
             lines.append("k toggles keyboard (Termux).")
@@ -981,16 +1069,23 @@ class OverwatchApp(App):
         left = self.query_one("#left", Vertical)
         operate = self.query_one("#operate-pane", OperatePane)
         operate_right = operate.query_one("#operate-right", Vertical)
+        runs = self.query_one("#runs-pane", RunsPane)
+        runs_columns = runs.query_one("#runs-columns", Horizontal)
+        runs_right = runs.query_one("#runs-right", Vertical)
         if self.is_narrow:
             body.add_class("narrow")
             right.add_class("narrow")
             left.add_class("narrow")
             operate.add_class("narrow")
+            runs_columns.add_class("narrow")
+            runs_right.add_class("narrow")
         else:
             body.remove_class("narrow")
             right.remove_class("narrow")
             left.remove_class("narrow")
             operate.remove_class("narrow")
+            runs_columns.remove_class("narrow")
+            runs_right.remove_class("narrow")
         right.display = (not self.is_narrow) or self.terminal_visible
         operate_right.display = self.intel_visible
         if right.display:
@@ -1019,6 +1114,7 @@ class OverwatchApp(App):
         hdr = self.query_one(StatusHeader)
         hdr.mode = name
         self.observe.display = (name == "Observe")
+        self.runs.display = (name == "Runs")
         self.files.display = (name == "Files")
         self.operate.display = (name == "Operate")
         self.terminal.display = (name == "Terminal")
@@ -1036,8 +1132,13 @@ class OverwatchApp(App):
             self.query_one("#files-path", Input).focus()
         elif self.mode == "Observe":
             self.query_one("#observe-filter", Input).focus()
+        elif self.mode == "Runs":
+            self.query_one("#runs-filter", Input).focus()
 
     def action_toggle_terminal(self) -> None:
+        if self.mode == "Runs":
+            self.toggle_runs_tail()
+            return
         if self.is_narrow:
             self.terminal_visible = not self.terminal_visible
             self.update_layout()
@@ -1072,6 +1173,7 @@ class OverwatchApp(App):
 
     def refresh_all(self) -> None:
         self.refresh_observe()
+        self.refresh_runs(preserve_selection=True)
         self.refresh_files()
         self.refresh_operate()
         self.refresh_config()
@@ -1095,6 +1197,131 @@ class OverwatchApp(App):
             lv.append(NavItem(r.name))
         lv.index = 0
         self.open_selected_run()
+
+    def refresh_runs_live(self) -> None:
+        self.refresh_runs(preserve_selection=True)
+
+    def refresh_runs_tail(self) -> None:
+        if self.mode != "Runs" or not self._runs_tail_enabled:
+            return
+        self.update_runs_viewer()
+
+    def refresh_runs(self, preserve_selection: bool = True) -> None:
+        lv = self.query_one("#runs-list", ListView)
+        prev_selected = self._runs_selected_name if preserve_selection else None
+        entries = [p for p in RUNS_DIR.iterdir()] if RUNS_DIR.exists() else []
+        dirs = sorted([p for p in entries if p.is_dir()], key=lambda p: p.name, reverse=True)
+        files = sorted([p for p in entries if p.is_file()], key=lambda p: p.name.lower())
+        combined = dirs + files
+        if self._runs_filter:
+            combined = [p for p in combined if self._runs_filter in p.name.lower()]
+        lv.clear()
+        if not combined:
+            lv.append(NavItem("No runs yet.", tag="__empty__"))
+            self._runs_selected_name = None
+            self.update_runs_viewer()
+            return
+        for entry in combined[:200]:
+            label = f"{entry.name}/" if entry.is_dir() else entry.name
+            lv.append(NavItem(label, tag=str(entry)))
+        new_index = 0
+        if prev_selected:
+            for idx, item in enumerate(lv.children):
+                if isinstance(item, NavItem) and Path(item.tag).name == prev_selected:
+                    new_index = idx
+                    break
+        lv.index = new_index
+        self.open_selected_run_entry()
+
+    def open_selected_run_entry(self) -> None:
+        lv = self.query_one("#runs-list", ListView)
+        if lv.index is None:
+            return
+        item = lv.get_item_at(lv.index)
+        if not isinstance(item, NavItem) or item.tag == "__empty__":
+            self._runs_selected_name = None
+            self.update_runs_viewer()
+            return
+        path = Path(item.tag)
+        previous_run = self._runs_selected_name
+        self._runs_selected_name = path.name
+        files_label = self.query_one("#runs-files-label", Label)
+        files_lv = self.query_one("#runs-files", ListView)
+        if path.is_dir():
+            if previous_run != path.name:
+                self._runs_selected_file = None
+            files_label.update(f"Run Files: {path.name}")
+            files_lv.display = True
+            self.populate_runs_files(path)
+        else:
+            files_label.update("Run Files")
+            files_lv.clear()
+            files_lv.display = False
+            self._runs_selected_file = None
+        self.update_runs_viewer()
+
+    def populate_runs_files(self, run_dir: Path) -> None:
+        files_lv = self.query_one("#runs-files", ListView)
+        prev_selected = self._runs_selected_file
+        files = sorted([p for p in run_dir.iterdir() if p.is_file()], key=lambda p: p.name.lower())
+        files_lv.clear()
+        if not files:
+            files_lv.append(NavItem("No files in run.", tag="__empty__"))
+            self._runs_selected_file = None
+            return
+        for entry in files:
+            files_lv.append(NavItem(entry.name, tag=str(entry)))
+        new_index = 0
+        preferred = prev_selected or ("output.log" if (run_dir / "output.log").exists() else None)
+        if preferred:
+            for idx, item in enumerate(files_lv.children):
+                if isinstance(item, NavItem) and Path(item.tag).name == preferred:
+                    new_index = idx
+                    break
+        files_lv.index = new_index
+        item = files_lv.get_item_at(files_lv.index)
+        if isinstance(item, NavItem) and item.tag != "__empty__":
+            self._runs_selected_file = Path(item.tag).name
+
+    def update_runs_viewer(self) -> None:
+        viewer = self.query_one("#runs-viewer", TextArea)
+        tail_label = self.query_one("#runs-tail-label", Label)
+        tail_status = "on" if self._runs_tail_enabled else "off"
+        tail_label.update(f"Viewer (tail: {tail_status})")
+        lv = self.query_one("#runs-list", ListView)
+        if lv.index is None:
+            viewer.text = "Select a run entry.\n"
+            return
+        item = lv.get_item_at(lv.index)
+        if not isinstance(item, NavItem) or item.tag == "__empty__":
+            viewer.text = "No run entry selected.\n"
+            return
+        path = Path(item.tag)
+        if path.is_dir():
+            files_lv = self.query_one("#runs-files", ListView)
+            if files_lv.index is None:
+                viewer.text = "Select a file from this run.\n"
+                return
+            file_item = files_lv.get_item_at(files_lv.index)
+            if not isinstance(file_item, NavItem) or file_item.tag == "__empty__":
+                viewer.text = "No run file selected.\n"
+                return
+            file_path = Path(file_item.tag)
+            self._runs_selected_file = file_path.name
+            viewer.text = self.read_runs_file(file_path)
+            return
+        viewer.text = self.read_runs_file(path)
+
+    def read_runs_file(self, path: Path) -> str:
+        if not path.exists():
+            return f"{path} not found.\n"
+        if path.is_dir():
+            return f"{path} is a directory.\n"
+        return tail_text(path, max_chars=8000)
+
+    def toggle_runs_tail(self) -> None:
+        self._runs_tail_enabled = not self._runs_tail_enabled
+        self.update_runs_viewer()
 
     def open_selected_run(self) -> None:
         lv = self.query_one("#observe-list", ListView)
@@ -1419,6 +1646,158 @@ class OverwatchApp(App):
     def ai_error(self, action: str, err: str) -> None:
         self.ai_emit(action, err, status="error")
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ai-action-ping":
+            asyncio.create_task(self.run_ai_ping())
+        elif event.button.id == "ai-action-summarize":
+            asyncio.create_task(self.run_ai_action("summarize"))
+        elif event.button.id == "ai-action-explain":
+            asyncio.create_task(self.run_ai_action("explain_error"))
+        elif event.button.id == "ai-action-next":
+            asyncio.create_task(self.run_ai_action("next_steps"))
+
+    def _read_text_limited(self, path: Path, max_chars: int = 8000) -> str:
+        if not path.exists():
+            return f"{path} not found."
+        if path.is_dir():
+            return f"{path} is a directory."
+        try:
+            data = path.read_text(errors="ignore")
+        except Exception as e:
+            return f"Unable to read {path}: {e}"
+        if len(data) > max_chars:
+            return data[-max_chars:]
+        return data
+
+    def _build_ai_context(self) -> Tuple[str, str]:
+        if self.mode in ("Runs", "Observe"):
+            run_dir = None
+            if self.mode == "Runs":
+                lv = self.query_one("#runs-list", ListView)
+                if lv.index is not None:
+                    item = lv.get_item_at(lv.index)
+                    if isinstance(item, NavItem) and item.tag != "__empty__":
+                        path = Path(item.tag)
+                        if path.is_dir():
+                            run_dir = path
+                        else:
+                            contents = self._read_text_limited(path, max_chars=8000)
+                            return f"File: {path.name}\n\n{contents}", f"run file {path.name}"
+            else:
+                lv = self.query_one("#observe-list", ListView)
+                if lv.index is not None:
+                    item = lv.get_item_at(lv.index)
+                    if isinstance(item, NavItem) and item.tag != "__empty__":
+                        run_dir = RUNS_DIR / item.label_text
+            if run_dir and run_dir.exists():
+                output = run_dir / "output.log"
+                meta = run_dir / "metadata.json"
+                parts = [
+                    f"Run: {run_dir.name}",
+                    f"metadata.json:\n{self._read_text_limited(meta, max_chars=4000)}",
+                    f"output.log:\n{self._read_text_limited(output, max_chars=8000)}",
+                ]
+                return "\n\n".join(parts), f"run {run_dir.name}"
+            return "", "No run selected."
+        if self.mode == "Operate":
+            lv = self.query_one("#operate-list", ListView)
+            if lv.index is None:
+                return "", "No tool selected."
+            item = lv.get_item_at(lv.index)
+            if not isinstance(item, NavItem) or item.tag == "__empty__":
+                return "", "No tool selected."
+            tool_path = Path(item.tag)
+            desc = TOOL_DESCRIPTIONS.get(tool_path.name, "No description available.")
+            tool_body = self._read_text_limited(tool_path, max_chars=8000)
+            context = f"Tool: {tool_path.name}\nDescription: {desc}\n\nContents:\n{tool_body}"
+            return context, f"tool {tool_path.name}"
+        if self.mode == "Files":
+            path = self.get_selected_files_path()
+            if path is None:
+                return "", "No file selected."
+            if path.is_dir():
+                return "", f"Selected path is a directory: {path}"
+            contents = self._read_text_limited(path, max_chars=8000)
+            return f"File: {path}\n\n{contents}", f"file {path.name}"
+        if self.mode == "Cleanup":
+            try:
+                cleanup_text = self.query_one("#cleanup-text", TextArea).text.strip()
+            except Exception:
+                cleanup_text = ""
+            if cleanup_text:
+                return cleanup_text, "cleanup text"
+            return "", "No cleanup text available."
+        return "", f"No context for mode {self.mode}."
+
+    async def run_ai_action(self, action: str) -> None:
+        env = merge_env_file(ENV_FILE)
+        key = env.get("OPENAI_API_KEY", "").strip()
+        model = env.get("OPENAI_MODEL", "").strip()
+        base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
+        if not key or not model:
+            msg = "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL"
+            self.ai_emit(action, msg, status="error")
+            return
+        self._ai_model = model
+        self._ai_base_url = base_url.rstrip("/")
+
+        context, context_desc = self._build_ai_context()
+        if not context:
+            self.ai_emit(action, context_desc, status="info", model=model)
+            return
+
+        if action == "summarize":
+            prompt = "Summarize the following context with key points and any notable issues."
+        elif action == "explain_error":
+            prompt = "Explain the error(s) or failures in the following context and likely causes."
+        elif action == "next_steps":
+            prompt = "Provide the next steps or recommended actions based on the following context."
+        else:
+            prompt = "Review the following context."
+
+        self.ai_emit(action, f"Requesting AI ({context_desc})...", status="info", model=model)
+
+        run_dir = make_run_dir("ai", action)
+        out_path = run_dir / "output.log"
+        started = now_utc()
+        exit_code = 1
+        response_text = ""
+
+        def do_request() -> str:
+            payload = {
+                "model": model,
+                "input": f"{prompt}\n\n{context}",
+            }
+            data = json.dumps(payload).encode("utf-8")
+            url = f"{self._ai_base_url}/responses"
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+
+        try:
+            raw = await asyncio.to_thread(do_request)
+            response_text = extract_ai_text(raw) or raw
+            self.ai_emit(action, response_text, status="ok", model=model)
+            exit_code = 0
+        except Exception as e:
+            err = f"AI call failed: {e}"
+            self.ai_error(action, err)
+            response_text = err
+            exit_code = 1
+        finally:
+            try:
+                out_path.write_text(response_text, encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+            write_metadata(run_dir, "ai", action, "openai.responses", self.cwd, exit_code, started, now_utc())
+
     async def action_ai_ping(self) -> None:
         asyncio.create_task(self.run_ai_ping())
 
@@ -1510,6 +1889,13 @@ class OverwatchApp(App):
                 self.update_cwd_labels()
         elif event.list_view.id == "observe-list":
             self.open_selected_run()
+        elif event.list_view.id == "runs-list":
+            self.open_selected_run_entry()
+        elif event.list_view.id == "runs-files":
+            item = event.item
+            if isinstance(item, NavItem) and item.tag != "__empty__":
+                self._runs_selected_file = Path(item.tag).name
+            self.update_runs_viewer()
         elif event.list_view.id == "files-tree" and not TREE_AVAILABLE:
             self.handle_fallback_selection(expand_toggle=True)
         elif event.list_view.id == "operate-list":
@@ -1547,6 +1933,9 @@ class OverwatchApp(App):
         elif event.input.id == "observe-filter":
             self._observe_filter = event.value.strip().lower()
             self.refresh_observe()
+        elif event.input.id == "runs-filter":
+            self._runs_filter = event.value.strip().lower()
+            self.refresh_runs(preserve_selection=True)
 
     def on_descendant_focus(self, event) -> None:
         control = getattr(event, "control", None)
@@ -1562,6 +1951,9 @@ class OverwatchApp(App):
         if event.input.id == "observe-filter":
             self._observe_filter = event.value.strip().lower()
             self.refresh_observe()
+        elif event.input.id == "runs-filter":
+            self._runs_filter = event.value.strip().lower()
+            self.refresh_runs(preserve_selection=True)
 
     async def action_enter(self) -> None:
         focused = self.focused
