@@ -47,6 +47,7 @@ export AXIOM_RUNTIME=1
 ############################################
 
 CANDIDATES=(
+  "$REPO_ROOT/cockpit/bin/overwatch.sh"
   "$REPO_ROOT/cockpit/overwatch.sh"
   "$REPO_ROOT/overwatch.sh"
 )
@@ -67,11 +68,11 @@ if [[ -z "$OVERWATCH" ]]; then
   done < <(
     find "$REPO_ROOT" \
       -path "$REPO_ROOT/.git" -prune -o \
-      -type f -name "overwatch.sh" -print 2>/dev/null || true
+      -maxdepth 5 -type f -name "overwatch.sh" -print 2>/dev/null || true
   )
 fi
 
-[[ -n "$OVERWATCH" ]] || die "Could not locate overwatch.sh"
+[[ -n "$OVERWATCH" ]] || die "Could not locate overwatch.sh in expected locations"
 [[ -x "$OVERWATCH" ]] || die "overwatch.sh is not executable: $OVERWATCH"
 
 ############################################
