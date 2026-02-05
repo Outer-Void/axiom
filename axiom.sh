@@ -91,9 +91,6 @@ export AXIOM_VENV_ACTIVE=1
 # Config
 ############################################
 
-DEFAULT_MANIFEST="cockpit/install/MANIFEST"
-MANIFEST="${AXIOM_MANIFEST:-$DEFAULT_MANIFEST}"
-
 DRY_RUN="${AXIOM_DRY_RUN:-0}"
 NONINTERACTIVE="${AXIOM_NONINTERACTIVE:-0}"
 
@@ -106,14 +103,12 @@ usage() {
 Usage: ./axiom.sh [options]
 
 Options:
-  --manifest <path>     Use a custom manifest file
   --dry-run             Print actions without executing
   --noninteractive      Disable prompts for child scripts
   --skip-preflight      Skip safety checks (not recommended)
   -h, --help            Show help
 
 Env vars:
-  AXIOM_MANIFEST=<path>
   AXIOM_DRY_RUN=1
   AXIOM_NONINTERACTIVE=1
 USAGE
@@ -123,12 +118,6 @@ SKIP_PREFLIGHT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --manifest)
-      shift
-      [[ $# -gt 0 ]] || die "--manifest requires a path"
-      MANIFEST="$1"
-      shift
-      ;;
     --dry-run)
       DRY_RUN="1"
       shift
@@ -162,11 +151,9 @@ else
 fi
 
 log "Repo root : $REPO_ROOT"
-log "Manifest  : $MANIFEST"
 
-if [[ "$NONINTERACTIVE" == "1" ]]; then
-  export AXIOM_NONINTERACTIVE=1
-fi
+export AXIOM_NONINTERACTIVE="${AXIOM_NONINTERACTIVE:-1}"
+NONINTERACTIVE="$AXIOM_NONINTERACTIVE"
 
 ############################################
 # Execute staged installers
@@ -174,6 +161,7 @@ fi
 
 run_stage() {
   local rel="$1"
+  local timeout_seconds="$2"
   local path="$REPO_ROOT/$rel"
   local started ended duration
 
@@ -189,79 +177,51 @@ run_stage() {
     return 0
   fi
 
-  # Execute with timeout protection when available
   local exit_code
   if command -v timeout >/dev/null 2>&1; then
-    timeout 1800 "$path"  # 30 minute timeout
+    timeout "$timeout_seconds" "$path"
     exit_code=$?
   else
+    log_warn "Timeout command not available; running without timeout for $rel"
     "$path"
     exit_code=$?
   fi
-  
+
   ended=$(date +%s)
   duration=$((ended - started))
-  
+
+  log "==> DONE: $rel (exit code: $exit_code, duration: ${duration}s)"
+
   if [[ $exit_code -eq 124 ]]; then
-    log_warn "<== TIMEOUT: $rel (exceeded 30 minutes)"
+    log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s)"
     return 1
   elif [[ $exit_code -ne 0 ]]; then
     log_warn "<== FAILED: $rel (exit code: $exit_code, duration: ${duration}s)"
     return $exit_code
-  else
-    log "<== OK:  $rel (duration: ${duration}s)"
-    return 0
   fi
+
+  log "<== OK:  $rel (duration: ${duration}s)"
+  return 0
 }
 
 log "Starting AXIOM full install sequence"
 
-# Track overall success
-OVERALL_SUCCESS=0
+stage_list=(
+  "cockpit/bin/cockpit.sh"
+  "cockpit/bin/blux10k.sh"
+)
+
 STAGE_COUNT=0
-FAILED_STAGES=()
 
-run_stage_list() {
-  local stages=("$@")
-  local line
-  for line in "${stages[@]}"; do
-    STAGE_COUNT=$((STAGE_COUNT + 1))
-    if ! run_stage "$line"; then
-      OVERALL_SUCCESS=1
-      FAILED_STAGES+=("$line")
-      if [[ "$NONINTERACTIVE" == "1" ]]; then
-        log_warn "Stage failed, but continuing due to non-interactive mode"
-      else
-        printf "Stage failed: %s\nContinue anyway? [y/N] " "$line"
-        read -r continue_response
-        if [[ ! "$continue_response" =~ ^[Yy]$ ]]; then
-          log "Installation aborted by user"
-          return 1
-        fi
-      fi
-    fi
-  done
-  return 0
-}
-
-if [[ -f "$MANIFEST" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [[ -z "$line" ]] && continue
-    if ! run_stage_list "$line"; then
-      break
-    fi
-  done < "$MANIFEST"
-else
-  log_warn "Manifest not found: $MANIFEST"
-  log "Running explicit staged installers instead."
-  default_stages=(
-    "cockpit/bin/cockpit.sh"
-    "cockpit/bin/blux10k.sh"
-  )
-  run_stage_list "${default_stages[@]}"
-fi
+for stage in "${stage_list[@]}"; do
+  STAGE_COUNT=$((STAGE_COUNT + 1))
+  log "Heartbeat: preparing to run stage $stage"
+  if ! run_stage "$stage" 1800; then
+    log_warn "Stage failed: $stage"
+    exit 1
+  fi
+  log "Heartbeat: completed stage $stage"
+done
 
 ############################################
 # Installation summary
@@ -269,17 +229,7 @@ fi
 
 log "AXIOM installation sequence completed"
 
-if [[ $OVERALL_SUCCESS -eq 0 ]]; then
-  log "✅ SUCCESS: All $STAGE_COUNT stages completed successfully"
-else
-  log_warn "⚠️  PARTIAL: $STAGE_COUNT stages run, ${#FAILED_STAGES[@]} failed"
-  if [[ ${#FAILED_STAGES[@]} -gt 0 ]]; then
-    log_warn "Failed stages:"
-    for stage in "${FAILED_STAGES[@]}"; do
-      log_warn "  - $stage"
-    done
-  fi
-fi
+log "✅ SUCCESS: All $STAGE_COUNT stages completed successfully"
 
 # Final instructions
 if [[ -f "$REPO_ROOT/launch.sh" && -x "$REPO_ROOT/launch.sh" ]]; then
@@ -288,4 +238,4 @@ if [[ -f "$REPO_ROOT/launch.sh" && -x "$REPO_ROOT/launch.sh" ]]; then
   log "  ./launch.sh"
 fi
 
-exit $OVERALL_SUCCESS
+exit 0
