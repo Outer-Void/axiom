@@ -20,6 +20,7 @@ COCKPIT_DIR="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
 RUN_DIR=""
 STARTED_AT=""
 RUN_COMMAND=""
+COCKPIT_PLATFORM=""
 
 log_info() {
   axiom_log_info "$*"
@@ -55,12 +56,15 @@ ensure_root_or_sudo() {
 apt_update_once() {
   local marker="/tmp/cockpit-apt-updated"
   if [ ! -f "$marker" ]; then
-    local apt_cmd=(apt-get)
-    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-      apt_cmd=(sudo apt-get)
-    fi
+    local apt_cmd=()
+    apt_command_prefix apt_cmd
     log_info "Updating apt package lists"
-    DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" update
+    if ! DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" update; then
+      if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
+        log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
+      fi
+      return 1
+    fi
     touch "$marker"
   fi
 }
@@ -81,15 +85,20 @@ apt_install() {
     return 0
   fi
 
-  ensure_root_or_sudo || return 1
-  apt_update_once
-  local apt_cmd=(apt-get)
-  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    apt_cmd=(sudo apt-get)
+  if [ "$COCKPIT_PLATFORM" != "proot-debian" ]; then
+    ensure_root_or_sudo || return 1
   fi
+  apt_update_once || return 1
+  local apt_cmd=()
+  apt_command_prefix apt_cmd
 
   log_info "Installing packages: ${packages[*]}"
-  DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" install -y "${packages[@]}"
+  if ! DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" install -y "${packages[@]}"; then
+    if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
+      log_error "sudo apt install failed. Ensure sudo is installed and configured for passwordless use."
+    fi
+    return 1
+  fi
 }
 
 pkg_install() {
@@ -206,6 +215,39 @@ check_pkg_manager() {
     return 1
   fi
   return 0
+}
+
+check_debian_pkg_manager() {
+  local require_sudo="$1"
+  if ! axiom_command_exists apt; then
+    log_error "Required package manager not found: apt"
+    return 1
+  fi
+  if ! apt --version >/dev/null 2>&1; then
+    log_error "Package manager health check failed: apt"
+    return 1
+  fi
+  if [ "$require_sudo" = "1" ]; then
+    if ! axiom_command_exists sudo; then
+      log_error "Required package manager not found: sudo"
+      return 1
+    fi
+    if ! sudo --version >/dev/null 2>&1; then
+      log_error "Package manager health check failed: sudo"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+apt_command_prefix() {
+  local -n _out="$1"
+  _out=(apt)
+  if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
+    _out=(sudo apt)
+  elif [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    _out=(sudo apt)
+  fi
 }
 
 cockpit_mktemp() {
@@ -376,7 +418,14 @@ provision_debian() {
   check_disk_space "/" || return 1
   check_memory_warn
   check_network "https://deb.debian.org" || return 1
-  check_pkg_manager apt-get || return 1
+  local require_sudo=1
+  if [ "${EUID:-$(id -u)}" -eq 0 ] && [ "$COCKPIT_PLATFORM" != "proot-debian" ]; then
+    require_sudo=0
+  fi
+  if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
+    require_sudo=1
+  fi
+  check_debian_pkg_manager "$require_sudo" || return 1
 
   local installed_list=()
   local remaining_list=()
@@ -843,8 +892,12 @@ main() {
 
   local platform
   platform="$(axiom_detect_platform)"
+  COCKPIT_PLATFORM="$platform"
 
   case "$platform" in
+    proot-debian)
+      log_info "Detected proot-distro Debian (distinct from Termux native)"
+      ;;
     termux)
       log_info "Detected Termux environment"
       provision_termux
@@ -861,6 +914,9 @@ main() {
       ;;
     wsl)
       log_info "Detected WSL environment"
+      ;;
+    debian)
+      log_info "Detected Debian environment"
       ;;
     linux|proot)
       log_info "Detected Linux environment"
