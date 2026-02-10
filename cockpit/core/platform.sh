@@ -48,6 +48,13 @@ axiom_is_termux_native() {
   return 1
 }
 
+axiom_is_termux() {
+  # true for Termux native OR Termux proot context (proot-distro Debian launched from Termux)
+  if axiom_is_termux_native; then return 0; fi
+  if axiom_has_termux_proot_context; then return 0; fi
+  return 1
+}
+
 axiom_is_wsl() {
   # Method 1: Check kernel release
   local uname_r
