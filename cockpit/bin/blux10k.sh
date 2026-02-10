@@ -178,7 +178,7 @@ apt_get_update() {
   sudo_prefix=$(get_sudo_prefix)
   local cmd=(apt-get update)
   if [[ -n "${sudo_prefix}" ]]; then
-    cmd=(sudo apt-get update)
+    cmd=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get update)
   fi
   run_with_timeout 60 "${cmd[@]}"
 }
@@ -188,7 +188,7 @@ apt_get_install() {
   sudo_prefix=$(get_sudo_prefix)
   local cmd=(apt-get install -y "$@")
   if [[ -n "${sudo_prefix}" ]]; then
-    cmd=(sudo apt-get install -y "$@")
+    cmd=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get install -y "$@")
   fi
   run_with_timeout 300 "${cmd[@]}"
 }
@@ -207,6 +207,14 @@ apt_install_optional() {
     fi
   else
     axiom_log_warn "Optional package not available: ${pkg}"
+  fi
+}
+
+apt_install_optional_fetch_tool() {
+  if apt_is_package_available fastfetch; then
+    apt_install_optional fastfetch
+  else
+    apt_install_optional neofetch
   fi
 }
 
@@ -257,7 +265,7 @@ install_dependencies() {
       apt_install_optional bat
       apt_install_optional eza
       apt_install_optional fd-find
-      apt_install_optional neofetch
+      apt_install_optional_fetch_tool
       ;;
     termux)
       if ! retry_command 3 run_with_timeout 60 pkg update; then
@@ -380,8 +388,8 @@ if [[ -f "$ZPLUG_HOME/init.zsh" ]]; then
   zplug "zsh-users/zsh-completions"
   zplug "Aloxaf/fzf-tab"
 
-  if ! zplug check --verbose; then
-    zplug install --verbose
+  if ! zplug check; then
+    zplug install
   fi
   zplug load
 fi
@@ -470,7 +478,7 @@ run_zplug_install() {
 
   if axiom_command_exists zsh; then
     axiom_log_info "Installing zplug plugins"
-    ZPLUG_HOME="${ZPLUG_HOME:-$HOME/.zplug}" zsh -lc 'source ~/.zshrc; zplug install --verbose'
+    ZPLUG_HOME="${ZPLUG_HOME:-$HOME/.zplug}" zsh -lc 'source ~/.zshrc; if ! zplug check; then zplug install; fi'
   else
     axiom_log_warn "zsh not available to run zplug install"
   fi
