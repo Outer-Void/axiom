@@ -59,7 +59,8 @@ apt_update_once() {
     local apt_cmd=()
     apt_command_prefix apt_cmd
     log_info "Updating apt package lists"
-    if ! DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" update; then
+    apt_debug_log "${apt_cmd[@]}" update
+    if ! "${apt_cmd[@]}" update; then
       if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
         log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
       fi
@@ -90,10 +91,16 @@ apt_install() {
   fi
   apt_update_once || return 1
   local apt_cmd=()
+  local apt_args=(install -y)
   apt_command_prefix apt_cmd
 
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    apt_args+=(--assume-yes)
+  fi
+
   log_info "Installing packages: ${packages[*]}"
-  if ! DEBIAN_FRONTEND=noninteractive "${apt_cmd[@]}" install -y "${packages[@]}"; then
+  apt_debug_log "${apt_cmd[@]}" "${apt_args[@]}" "${packages[@]}"
+  if ! "${apt_cmd[@]}" "${apt_args[@]}" "${packages[@]}"; then
     if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
       log_error "sudo apt install failed. Ensure sudo is installed and configured for passwordless use."
     fi
@@ -244,10 +251,21 @@ apt_command_prefix() {
   local -n _out="$1"
   _out=(apt)
   if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
-    _out=(sudo apt)
+    _out=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt)
   elif [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    _out=(sudo apt)
+    _out=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt)
+  else
+    _out=(env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt)
   fi
+}
+
+apt_debug_log() {
+  if [ "${APT_DEBUG:-0}" != "1" ]; then
+    return 0
+  fi
+  local rendered
+  printf -v rendered '%q ' "$@"
+  log_info "APT_DEBUG command: ${rendered% }"
 }
 
 cockpit_mktemp() {
