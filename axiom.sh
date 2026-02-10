@@ -50,18 +50,25 @@ if ! . "$PY_VENV"; then
 fi
 set -u
 
-if [[ -z "${VIRTUAL_ENV:-}" || ! -d "${VIRTUAL_ENV:-}" ]]; then
-  die "Virtual environment is not active after sourcing py_venv.sh"
-fi
+venv_dir="${VIRTUAL_ENV:-}"
 
 if ! python - <<'PY' >/dev/null 2>&1
 import os
+import pathlib
 import sys
-ve = os.environ.get("VIRTUAL_ENV", "")
-raise SystemExit(0 if ve and os.path.abspath(sys.prefix) == os.path.abspath(ve) else 1)
+repo_root = pathlib.Path(os.environ.get("REPO_ROOT", "")).resolve()
+sys_prefix = pathlib.Path(sys.prefix).resolve()
+venv = os.environ.get("VIRTUAL_ENV", "")
+venv_ok = bool(venv) and pathlib.Path(venv).resolve() == sys_prefix
+inside_repo_venv = bool(repo_root) and sys_prefix == (repo_root / ".venv").resolve()
+raise SystemExit(0 if (venv_ok or inside_repo_venv) else 1)
 PY
 then
-  die "Virtual environment sanity check failed (sys.prefix does not match VIRTUAL_ENV)"
+  die "Virtual environment sanity check failed (expected active VIRTUAL_ENV or python from .venv)"
+fi
+
+if [[ -z "$venv_dir" || ! -d "$venv_dir" ]]; then
+  log "VIRTUAL_ENV is not set; using python interpreter from $REPO_ROOT/.venv"
 fi
 
 export AXIOM_VENV_ACTIVE=1
