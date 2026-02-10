@@ -49,9 +49,8 @@ axiom_is_termux_native() {
 }
 
 axiom_is_termux() {
-  # true for Termux native OR Termux proot context (proot-distro Debian launched from Termux)
-  if axiom_is_termux_native; then return 0; fi
-  if axiom_has_termux_proot_context; then return 0; fi
+  axiom_is_termux_native && return 0
+  axiom_has_termux_proot_context && return 0
   return 1
 }
 
