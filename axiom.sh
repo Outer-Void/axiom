@@ -31,6 +31,42 @@ REPO_ROOT="$(resolve_self)"
 cd "$REPO_ROOT" || die "Failed to cd to repo root: $REPO_ROOT"
 
 ############################################
+# Python virtual environment (must be first)
+############################################
+
+PY_VENV="$REPO_ROOT/py_venv.sh"
+
+if [[ ! -f "$PY_VENV" ]]; then
+  die "py_venv.sh not found at repo root: $PY_VENV"
+fi
+
+log "Initializing Python virtual environment"
+# MUST be sourced
+# shellcheck source=/dev/null
+set +u
+if ! . "$PY_VENV"; then
+  set -u
+  die "Failed to source py_venv.sh"
+fi
+set -u
+
+if [[ -z "${VIRTUAL_ENV:-}" || ! -d "${VIRTUAL_ENV:-}" ]]; then
+  die "Virtual environment is not active after sourcing py_venv.sh"
+fi
+
+if ! python - <<'PY' >/dev/null 2>&1
+import os
+import sys
+ve = os.environ.get("VIRTUAL_ENV", "")
+raise SystemExit(0 if ve and os.path.abspath(sys.prefix) == os.path.abspath(ve) else 1)
+PY
+then
+  die "Virtual environment sanity check failed (sys.prefix does not match VIRTUAL_ENV)"
+fi
+
+export AXIOM_VENV_ACTIVE=1
+
+############################################
 # Pre-flight safety checks
 ############################################
 
@@ -69,23 +105,6 @@ preflight_checks() {
   
   log "Pre-flight checks passed"
 }
-
-############################################
-# Python virtual environment (root)
-############################################
-
-PY_VENV="$REPO_ROOT/py_venv.sh"
-
-if [[ -f "$PY_VENV" ]]; then
-  log "Initializing Python virtual environment"
-  # MUST be sourced
-  # shellcheck source=/dev/null
-  . "$PY_VENV"
-else
-  die "py_venv.sh not found at repo root"
-fi
-
-export AXIOM_VENV_ACTIVE=1
 
 ############################################
 # Config
@@ -206,10 +225,37 @@ run_stage() {
 
 log "Starting AXIOM full install sequence"
 
-stage_list=(
+default_stage_list=(
   "cockpit/bin/cockpit.sh"
   "cockpit/bin/blux10k.sh"
 )
+
+manifest_path="$REPO_ROOT/cockpit/install/MANIFEST"
+stage_list=()
+
+if [[ -f "$manifest_path" ]]; then
+  log "Loading install manifest: $manifest_path"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # trim leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
+    [[ -z "$line" || "$line" == \#* ]] && continue
+
+    if [[ -f "$REPO_ROOT/$line" ]]; then
+      stage_list+=("$line")
+    else
+      log_warn "Manifest stage missing, skipping: $line"
+    fi
+  done < "$manifest_path"
+
+  if [[ ${#stage_list[@]} -eq 0 ]]; then
+    die "Manifest present but no valid stages found: $manifest_path"
+  fi
+else
+  log_warn "Manifest not found, using built-in stage list"
+  stage_list=("${default_stage_list[@]}")
+fi
 
 STAGE_COUNT=0
 

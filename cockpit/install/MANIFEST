@@ -1,0 +1,3 @@
+# AXIOM staged installer manifest (paths are relative to repo root)
+cockpit/bin/cockpit.sh
+cockpit/bin/blux10k.sh
