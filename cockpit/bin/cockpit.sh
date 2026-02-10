@@ -16,6 +16,8 @@ COCKPIT_DIR="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
 . "$COCKPIT_DIR/core/env.sh"
 # shellcheck disable=SC1091
 . "$COCKPIT_DIR/core/runs.sh"
+# shellcheck disable=SC1091
+. "$COCKPIT_DIR/core/apt.sh"
 
 RUN_DIR=""
 STARTED_AT=""
@@ -56,11 +58,8 @@ ensure_root_or_sudo() {
 apt_update_once() {
   local marker="/tmp/cockpit-apt-updated"
   if [ ! -f "$marker" ]; then
-    local apt_cmd=()
-    apt_command_prefix apt_cmd
     log_info "Updating apt package lists"
-    apt_debug_log "${apt_cmd[@]}" update -qq
-    if ! "${apt_cmd[@]}" update -qq; then
+    if ! axiom_apt_update; then
       if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
         log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
       fi
@@ -90,17 +89,9 @@ apt_install() {
     ensure_root_or_sudo || return 1
   fi
   apt_update_once || return 1
-  local apt_cmd=()
-  local apt_args=(install -y -qq)
-  apt_command_prefix apt_cmd
-
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    apt_args+=(--assume-yes)
-  fi
 
   log_info "Installing packages: ${packages[*]}"
-  apt_debug_log "${apt_cmd[@]}" "${apt_args[@]}" "${packages[@]}"
-  if ! "${apt_cmd[@]}" "${apt_args[@]}" "${packages[@]}"; then
+  if ! axiom_apt_install "${packages[@]}"; then
     if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
       log_error "sudo apt install failed. Ensure sudo is installed and configured for passwordless use."
     fi
@@ -245,24 +236,6 @@ check_debian_pkg_manager() {
     fi
   fi
   return 0
-}
-
-apt_command_prefix() {
-  local -n _out="$1"
-  if [ "$COCKPIT_PLATFORM" = "proot-debian" ] || [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    _out=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt)
-  else
-    _out=(env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt)
-  fi
-}
-
-apt_debug_log() {
-  if [ "${APT_DEBUG:-0}" != "1" ]; then
-    return 0
-  fi
-  local rendered
-  printf -v rendered '%q ' "$@"
-  log_info "APT_DEBUG command: ${rendered% }"
 }
 
 cockpit_mktemp() {

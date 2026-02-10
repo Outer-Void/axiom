@@ -24,6 +24,8 @@ source "${COCKPIT_DIR}/core/platform.sh"
 source "${COCKPIT_DIR}/core/env.sh"
 # shellcheck source=../core/runs.sh
 source "${COCKPIT_DIR}/core/runs.sh"
+# shellcheck source=../core/apt.sh
+source "${COCKPIT_DIR}/core/apt.sh"
 
 AXIOM_VERSION="1.0.0"
 AXIOM_REPO="${AXIOM_REPO_URL}"
@@ -167,30 +169,12 @@ detect_platform() {
   OS_FAMILY="unsupported"
 }
 
-get_sudo_prefix() {
-  if axiom_command_exists sudo && [[ "${EUID}" -ne 0 ]]; then
-    echo "sudo"
-  fi
-}
-
 apt_get_update() {
-  local sudo_prefix
-  sudo_prefix=$(get_sudo_prefix)
-  local cmd=(apt-get update)
-  if [[ -n "${sudo_prefix}" ]]; then
-    cmd=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get update)
-  fi
-  run_with_timeout 60 "${cmd[@]}"
+  run_with_timeout 60 axiom_apt_update
 }
 
 apt_get_install() {
-  local sudo_prefix
-  sudo_prefix=$(get_sudo_prefix)
-  local cmd=(apt-get install -y "$@")
-  if [[ -n "${sudo_prefix}" ]]; then
-    cmd=(sudo env DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true apt-get install -y "$@")
-  fi
-  run_with_timeout 300 "${cmd[@]}"
+  run_with_timeout 300 axiom_apt_install "$@"
 }
 
 apt_is_package_available() {
