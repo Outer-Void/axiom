@@ -48,6 +48,18 @@ mkdir -p "${RUNS_DIR}" "${CONFIG_DIR}" 2>/dev/null || true
 axiom_ensure_env_file "${ENV_FILE}" "${CONFIG_DIR}/.env.example"
 axiom_load_env_file "${ENV_FILE}"
 
+AI_HELPER_SCRIPT="${COCKPIT_DIR}/bin/gpt-4o-mini.sh"
+AI_BACKEND_NAME="gpt-4o-mini"
+BLUXGPT_CLI_PATH=""
+if [ "${BLUXGPT_READY:-0}" = "1" ] && [ -n "${BLUXGPT_REPO_ROOT:-}" ]; then
+  candidate_cli="${BLUXGPT_REPO_ROOT}/bluxgpt/cli.py"
+  if [ -f "${candidate_cli}" ]; then
+    AI_BACKEND_NAME="bluxgpt"
+    BLUXGPT_CLI_PATH="${candidate_cli}"
+    AI_HELPER_SCRIPT="${candidate_cli}"
+  fi
+fi
+
 # Platform-specific python command default
 PYTHON_CMD="python3"
 if [ "${PLATFORM}" = "windows" ]; then
@@ -137,6 +149,8 @@ self_test() {
     echo "  (locker dir missing)"
   fi
   echo "Python: ${PYTHON_CMD}"
+  echo "AI backend: ${AI_BACKEND_NAME}"
+  echo "AI helper: ${AI_HELPER_SCRIPT}"
 }
 
 run_fallback_mode() {
@@ -360,7 +374,9 @@ CONFIG_DIR = Path("${CONFIG_DIR}").resolve()
 ENV_FILE = Path("${ENV_FILE}").resolve()
 LOCKER_DIR = Path("${LOCKER_DIR}").resolve()
 AI_LOG_PATH = RUNS_DIR / "ai_output.log"
-AI_SCRIPT = COCKPIT_DIR / "bin" / "gpt-4o-mini.sh"
+AI_BACKEND = "${AI_BACKEND_NAME}"
+AI_SCRIPT = Path("${AI_HELPER_SCRIPT}").resolve()
+BLUXGPT_CLI = Path("${BLUXGPT_CLI_PATH}").resolve() if "${BLUXGPT_CLI_PATH}" else None
 
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -416,11 +432,21 @@ def load_env_file(path: Path) -> dict:
 
 def merge_env_file(path: Path) -> dict:
     env = load_env_file(path)
-    for key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"):
+    for key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "BLUXGPT_READY", "BLUXGPT_VERSION", "BLUXGPT_REPO_ROOT"):
         val = os.environ.get(key)
         if val:
             env[key] = val
     return env
+
+def bluxgpt_available(env: Optional[dict] = None) -> bool:
+    env = env or os.environ
+    ready = str(env.get("BLUXGPT_READY", "0")).strip() == "1"
+    root = str(env.get("BLUXGPT_REPO_ROOT", "")).strip()
+    if BLUXGPT_CLI:
+        return ready and bool(root) and BLUXGPT_CLI.exists()
+    if not ready or not root:
+        return False
+    return (Path(root) / "bluxgpt" / "cli.py").exists()
 
 def now_utc() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1140,15 +1166,20 @@ class OverwatchApp(App):
 
     def update_ai_status(self) -> None:
         env = merge_env_file(ENV_FILE)
+        hdr = self.query_one(StatusHeader)
+        if bluxgpt_available(env):
+            model = env.get("BLUXGPT_VERSION", "").strip() or "BluxGPT"
+            hdr.ai = f"AI: {model} (BluxGPT)"
+            self._ai_model = model
+            return
         key_ok = bool(env.get("OPENAI_API_KEY", "").strip())
         model = env.get("OPENAI_MODEL", "").strip()
-        hdr = self.query_one(StatusHeader)
-        hdr.ai = f"AI: {model}" if (key_ok and model) else "AI: unavailable"
+        hdr.ai = f"AI: {model} (fallback)" if (key_ok and model) else "AI: unavailable"
         if key_ok and model:
             self._ai_model = model
-        base_url = env.get("OPENAI_BASE_URL", "").strip()
-        if base_url:
-            self._ai_base_url = base_url
+            base_url = env.get("OPENAI_BASE_URL", "").strip()
+            if base_url:
+                self._ai_base_url = base_url
 
     def update_cwd_labels(self) -> None:
         hdr = self.query_one(StatusHeader)
@@ -1748,12 +1779,16 @@ class OverwatchApp(App):
 
     def initialize_ai_window(self) -> None:
         env = merge_env_file(ENV_FILE)
+        if bluxgpt_available(env):
+            version = env.get("BLUXGPT_VERSION", "").strip() or "BluxGPT"
+            self.ai_emit("startup", f"AI online: backend=bluxgpt version={version}", status="ok", model=version)
+            return
         key = env.get("OPENAI_API_KEY", "").strip()
         model = env.get("OPENAI_MODEL", "").strip()
         if key and model:
-            self.ai_emit("startup", f"AI online: model={model}", status="ok", model=model)
+            self.ai_emit("startup", "AI online: backend=gpt-4o-mini fallback", status="ok", model=model)
         else:
-            self.ai_emit("startup", "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL", status="error")
+            self.ai_emit("startup", "AI unavailable: missing BluxGPT backend and fallback OPENAI_API_KEY/OPENAI_MODEL", status="error")
             self._ai_unavailable_emitted = True
 
     def ai_emit(self, action: str, text: str, status: str = "ok", model: str = "") -> None:
@@ -1874,6 +1909,15 @@ class OverwatchApp(App):
     async def run_ai_preflight(self, model: str) -> None:
         if self._ai_preflight_done:
             return
+        env = merge_env_file(ENV_FILE)
+        if bluxgpt_available(env):
+            if not BLUXGPT_CLI or not BLUXGPT_CLI.exists():
+                self.ai_error("ai_preflight", "BluxGPT backend selected but cli.py is missing.")
+                self._ai_preflight_done = True
+                return
+            self.ai_emit("ai_preflight", f"Using BluxGPT backend: {BLUXGPT_CLI}", status="info", model=model)
+            self._ai_preflight_done = True
+            return
         if not AI_SCRIPT.exists():
             self.ai_error("ai_preflight", f"AI helper missing: {AI_SCRIPT}")
             self._ai_preflight_done = True
@@ -1896,15 +1940,19 @@ class OverwatchApp(App):
 
     async def run_ai_action(self, action: str) -> None:
         env = merge_env_file(ENV_FILE)
+        use_bluxgpt = bluxgpt_available(env)
         key = env.get("OPENAI_API_KEY", "").strip()
         model = env.get("OPENAI_MODEL", "").strip()
-        base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
-        if not key or not model:
-            msg = "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL"
-            self.ai_emit(action, msg, status="error")
-            return
+        if use_bluxgpt:
+            model = env.get("BLUXGPT_VERSION", "").strip() or "BluxGPT"
+        else:
+            base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
+            if not key or not model:
+                msg = "AI unavailable: missing BluxGPT and fallback OPENAI_API_KEY or OPENAI_MODEL"
+                self.ai_emit(action, msg, status="error")
+                return
+            self._ai_base_url = base_url.rstrip("/")
         self._ai_model = model
-        self._ai_base_url = base_url.rstrip("/")
         await self.run_ai_preflight(model)
 
         context, context_desc = self._build_ai_context()
@@ -1923,7 +1971,8 @@ class OverwatchApp(App):
         else:
             prompt = "Review the following context."
 
-        self.ai_emit(action, f"Requesting AI ({context_desc})...", status="info", model=model)
+        backend_label = "bluxgpt" if use_bluxgpt else "gpt-4o-mini"
+        self.ai_emit(action, f"Requesting AI via {backend_label} ({context_desc})...", status="info", model=model)
 
         run_dir = make_run_dir("ai", action)
         out_path = run_dir / "output.log"
@@ -1937,10 +1986,20 @@ class OverwatchApp(App):
                 raise ValueError("AI request payload must be a string.")
             if len(input_text.encode("utf-8")) > 10 * 1024:
                 raise ValueError("AI request exceeds 10KB limit.")
-            if not self._ai_base_url.startswith("https://"):
-                raise ValueError("AI base URL must use https.")
             if ai_request_blocked(input_text):
                 raise ValueError("AI request blocked due to destructive command content.")
+            if use_bluxgpt:
+                if not BLUXGPT_CLI or not BLUXGPT_CLI.exists():
+                    raise ValueError("BluxGPT backend selected but CLI is missing.")
+                cmd = [os.environ.get("PYTHON", "python3"), str(BLUXGPT_CLI), input_text]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=False)
+                out = (proc.stdout or "").strip()
+                err = (proc.stderr or "").strip()
+                if proc.returncode != 0:
+                    raise RuntimeError(err or f"BluxGPT CLI failed with exit code {proc.returncode}")
+                return out or "ok"
+            if not self._ai_base_url.startswith("https://"):
+                raise ValueError("AI base URL must use https.")
             payload = {
                 "model": model,
                 "input": input_text,
@@ -1974,7 +2033,7 @@ class OverwatchApp(App):
                 out_path.write_text(response_text, encoding="utf-8", errors="ignore")
             except Exception:
                 pass
-            write_metadata(run_dir, "ai", action, "gpt-4o-mini.sh", self.cwd, exit_code, started, now_utc())
+            write_metadata(run_dir, "ai", action, backend_label, self.cwd, exit_code, started, now_utc())
 
     async def action_ai_ping(self) -> None:
         asyncio.create_task(self.run_ai_ping())
@@ -1982,17 +2041,22 @@ class OverwatchApp(App):
     async def run_ai_ping(self) -> None:
         action = "ai_ping"
         env = merge_env_file(ENV_FILE)
+        use_bluxgpt = bluxgpt_available(env)
         key = env.get("OPENAI_API_KEY", "").strip()
         model = env.get("OPENAI_MODEL", "").strip()
-        base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
-        if not key or not model:
-            msg = "AI unavailable: missing OPENAI_API_KEY or OPENAI_MODEL"
-            self.ai_emit(action, msg, status="error")
-            return
+        if use_bluxgpt:
+            model = env.get("BLUXGPT_VERSION", "").strip() or "BluxGPT"
+        else:
+            base_url = env.get("OPENAI_BASE_URL", "").strip() or self._ai_base_url
+            if not key or not model:
+                msg = "AI unavailable: missing BluxGPT and fallback OPENAI_API_KEY or OPENAI_MODEL"
+                self.ai_emit(action, msg, status="error")
+                return
+            self._ai_base_url = base_url.rstrip("/")
         self._ai_model = model
-        self._ai_base_url = base_url.rstrip("/")
         await self.run_ai_preflight(model)
-        self.ai_emit(action, "Requesting analysis...", status="info", model=model)
+        backend_label = "bluxgpt" if use_bluxgpt else "gpt-4o-mini"
+        self.ai_emit(action, f"Requesting analysis via {backend_label}...", status="info", model=model)
 
         run_dir = make_run_dir("ai", "ping")
         out_path = run_dir / "output.log"
@@ -2006,10 +2070,20 @@ class OverwatchApp(App):
                 raise ValueError("AI request payload must be a string.")
             if len(input_text.encode("utf-8")) > 10 * 1024:
                 raise ValueError("AI request exceeds 10KB limit.")
-            if not self._ai_base_url.startswith("https://"):
-                raise ValueError("AI base URL must use https.")
             if ai_request_blocked(input_text):
                 raise ValueError("AI request blocked due to destructive command content.")
+            if use_bluxgpt:
+                if not BLUXGPT_CLI or not BLUXGPT_CLI.exists():
+                    raise ValueError("BluxGPT backend selected but CLI is missing.")
+                cmd = [os.environ.get("PYTHON", "python3"), str(BLUXGPT_CLI), input_text]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+                out = (proc.stdout or "").strip()
+                err = (proc.stderr or "").strip()
+                if proc.returncode != 0:
+                    raise RuntimeError(err or f"BluxGPT CLI failed with exit code {proc.returncode}")
+                return out or "ok"
+            if not self._ai_base_url.startswith("https://"):
+                raise ValueError("AI base URL must use https.")
             payload = {"model": model, "input": input_text}
             data = json.dumps(payload).encode("utf-8")
             url = f"{self._ai_base_url}/responses"
@@ -2040,7 +2114,7 @@ class OverwatchApp(App):
                 out_path.write_text(response_text, encoding="utf-8", errors="ignore")
             except Exception:
                 pass
-            write_metadata(run_dir, "ai", "ping", "gpt-4o-mini.sh", self.cwd, exit_code, started, now_utc())
+            write_metadata(run_dir, "ai", "ping", backend_label, self.cwd, exit_code, started, now_utc())
 
     def update_operate_tool_info(self, tool: Optional[Path]) -> None:
         preview = self.query_one("#operate-preview", TextArea)
