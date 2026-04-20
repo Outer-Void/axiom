@@ -235,6 +235,7 @@ log "Starting AXIOM full install sequence"
 default_stage_list=(
   "cockpit/bin/cockpit.sh"
   "cockpit/bin/blux10k.sh"
+  "cockpit/bin/axiom_env.sh"
 )
 
 manifest_path="$REPO_ROOT/cockpit/install/MANIFEST"

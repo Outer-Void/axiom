@@ -53,7 +53,7 @@ Baseline bootstrap. Establishes a Debian-like foundation.
 Supports native Debian/Linux, WSL2 (Debian), and Termux via proot-distro Debian.
 
 `cockpit/bin/blux10k.sh`  
-Full terminal buildout: Zsh, prompt, plugins, ergonomics, and daily-driver shell configuration.
+blux10k prerequisite gate: verifies or installs the blux10k foundation required by AXIOM.
 
 `cockpit/bin/overwatch.sh`  
 A full-screen TUI cockpit for operating AXIOM:
@@ -138,7 +138,7 @@ This is a cockpit — not a toy.
 
 4. Launch the cockpit via `overwatch.sh`.
 
-5. Build the full terminal shell with `blux10k.sh` when ready.
+5. Run `blux10k.sh` to verify/install blux10k and `axiom_env.sh` to maintain the AXIOM `~/.zshrc.local` overlay.
 
 Refer to each directory’s `README.md` for detailed usage.
 
