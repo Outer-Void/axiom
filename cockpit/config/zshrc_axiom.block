@@ -1,0 +1,14 @@
+### >>> AXIOM OVERLAY >>>
+export AXIOM_VERSION="1.0.0"
+export AXIOM_HOME="${AXIOM_HOME:-$HOME/.config/axiom}"
+export AXIOM_REPO_ROOT="__AXIOM_REPO_ROOT__"
+export AXIOM_READY=1
+
+if [[ ":$PATH:" != *":$HOME/tools/scripts/axiom:"* ]]; then
+  export PATH="$HOME/tools/scripts/axiom:$PATH"
+fi
+
+if [[ -f "$HOME/tools/scripts/axiom/ax" ]]; then
+  source "$HOME/tools/scripts/axiom/ax"
+fi
+### <<< AXIOM OVERLAY <<<
