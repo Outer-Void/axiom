@@ -58,6 +58,7 @@ blux10k prerequisite gate: verifies or installs the blux10k foundation required 
 `cockpit/bin/overwatch.sh`  
 A full-screen TUI cockpit for operating AXIOM:
 observe past runs, operate locker tools, inspect signals, navigate the filesystem, and perform cleanup operations.
+When BluxGPT is available (`BLUXGPT_READY=1` with a valid `BLUXGPT_REPO_ROOT`), Overwatch prefers it for AI actions and falls back to `gpt-4o-mini.sh` when BluxGPT is unavailable.
 
 `cockpit/bin/gpt-4o-mini.sh`  
 Optional AI sidecar installer and connectivity tester.

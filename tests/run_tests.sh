@@ -380,6 +380,19 @@ test_dry_run() {
   return 0
 }
 
+test_ax_trifecta_status_doctor() {
+  local out
+  set +u
+  out="$(bash -lc 'source "'"$COCKPIT_BIN_DIR"'/ax" && ax status; ax doctor || true' 2>&1)" || return 1
+  set -u
+
+  printf '%s' "$out" | grep -q "AXIOM status (trifecta runtime)" || return 1
+  printf '%s' "$out" | grep -q "\[blux10k layer\]" || return 1
+  printf '%s' "$out" | grep -q "\[AXIOM layer\]" || return 1
+  printf '%s' "$out" | grep -q "\[BluxGPT layer\]" || return 1
+  return 0
+}
+
 # =============================================================================
 # TEST GROUPS
 # =============================================================================
@@ -424,6 +437,7 @@ run_integration_tests() {
   else
     skip_test "axiom.sh - Dry run mode" "No MANIFEST file found"
   fi
+  run_test "ax - Trifecta status/doctor report" test_ax_trifecta_status_doctor
 }
 
 run_all_tests() {

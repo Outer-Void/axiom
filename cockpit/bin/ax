@@ -13,8 +13,8 @@ _ax_repo_root() {
   fi
   local source_dir
   source_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
-  if [[ -d "${source_dir}/../../.." ]]; then
-    (cd -P "${source_dir}/../../.." >/dev/null 2>&1 && pwd -P)
+  if [[ -d "${source_dir}/../.." ]]; then
+    (cd -P "${source_dir}/../.." >/dev/null 2>&1 && pwd -P)
     return 0
   fi
   return 1
@@ -43,6 +43,43 @@ _ax_blux_version() {
     tr -d '[:space:]' <"$version_file"
   else
     printf '%s\n' "missing"
+  fi
+}
+
+_ax_bluxgpt_repo_root() {
+  if [[ -n "${BLUXGPT_REPO_ROOT:-}" && -d "${BLUXGPT_REPO_ROOT}" ]]; then
+    printf '%s\n' "${BLUXGPT_REPO_ROOT}"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+_ax_bluxgpt_cli_path() {
+  local root
+  root="$(_ax_bluxgpt_repo_root)"
+  if [[ -n "$root" ]]; then
+    printf '%s\n' "${root}/bluxgpt/cli.py"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+_ax_bluxgpt_available() {
+  local cli_path
+  cli_path="$(_ax_bluxgpt_cli_path)"
+  if [[ "${BLUXGPT_READY:-0}" == "1" && -n "${BLUXGPT_REPO_ROOT:-}" && -f "${cli_path}" ]]; then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "0"
+  fi
+}
+
+_ax_bluxgpt_overlay_present() {
+  local zlocal="$HOME/.zshrc.local"
+  if [[ -f "$zlocal" ]] && grep -qE 'BLUXGPT|bluxgpt|blux' "$zlocal"; then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "0"
   fi
 }
 
@@ -79,43 +116,129 @@ _ax_launch() {
 }
 
 _ax_status() {
+  local repo_root
+  repo_root="$(_ax_repo_root 2>/dev/null || true)"
   local ax_path="$HOME/tools/scripts/axiom/ax"
   local zlocal="$HOME/.zshrc.local"
-
-  echo "AXIOM_VERSION=$(_ax_version_value)"
-  echo "AXIOM_REPO_ROOT=${AXIOM_REPO_ROOT:-unset}"
-  echo "AXIOM_COMMAND=$(command -v ax 2>/dev/null || echo unavailable)"
-  echo "INSTALLED_AX=$ax_path"
-  [[ -f "$ax_path" ]] && echo "AX_INSTALLED=1" || echo "AX_INSTALLED=0"
-  [[ -f "$zlocal" ]] && echo "ZSHRC_LOCAL=1" || echo "ZSHRC_LOCAL=0"
-  if [[ -f "$zlocal" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$zlocal"; then
-    echo "AXIOM_OVERLAY=1"
-  else
-    echo "AXIOM_OVERLAY=0"
+  local blux10k_scripts="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/tools/scripts"
+  local locker_path=""
+  local armory_path=""
+  if [[ -n "$repo_root" ]]; then
+    locker_path="${repo_root}/locker"
+    armory_path="${repo_root}/armory"
   fi
+
+  echo "AXIOM status (trifecta runtime)"
+  echo "blux10k: ready=${BLUX10K_READY:-0} version=$(_ax_blux_version) scripts=${blux10k_scripts}"
+  echo "AXIOM: ready=${AXIOM_READY:-0} version=$(_ax_version_value) repo=${repo_root:-unset}"
+  echo "AXIOM: ax=$(command -v ax 2>/dev/null || echo unavailable) installed_ax=${ax_path} locker=${locker_path:-unset} armory=${armory_path:-unset}"
+  if [[ -f "$zlocal" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$zlocal"; then
+    echo "AXIOM overlay: present"
+  else
+    echo "AXIOM overlay: missing"
+  fi
+  echo "BluxGPT: ready=${BLUXGPT_READY:-0} version=${BLUXGPT_VERSION:-missing} backend_available=$(_ax_bluxgpt_available)"
 }
 
 _ax_doctor() {
   local failed=0
+  local repo_root
+  repo_root="$(_ax_repo_root 2>/dev/null || true)"
+  local ax_path="$HOME/tools/scripts/axiom/ax"
+  local zlocal="$HOME/.zshrc.local"
+  local blux10k_scripts="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/tools/scripts"
+  local bluxgpt_cli
+  bluxgpt_cli="$(_ax_bluxgpt_cli_path)"
+
+  echo "=== AXIOM Doctor: Trifecta Runtime Report ==="
+  echo ""
+  echo "[blux10k layer]"
+  echo "BLUX10K_READY=${BLUX10K_READY:-0}"
+  echo "BLUX10K_VERSION=$(_ax_blux_version)"
+  echo "BLUX10K_SCRIPTS_PATH=${blux10k_scripts}"
+  if [[ -d "${blux10k_scripts}" ]]; then
+    echo "[ok] blux10k scripts path exists"
+  else
+    echo "[warn] blux10k scripts path missing"
+    failed=1
+  fi
+  echo ""
+
+  echo "[AXIOM layer]"
+  echo "AXIOM_READY=${AXIOM_READY:-0}"
+  echo "AXIOM_VERSION=$(_ax_version_value)"
+  echo "AXIOM_REPO_ROOT=${repo_root:-unset}"
+  echo "INSTALLED_AX_PATH=${ax_path}"
+  if [[ -n "$repo_root" ]]; then
+    echo "LOCKER_PATH=${repo_root}/locker"
+    echo "ARMORY_PATH=${repo_root}/armory"
+  else
+    echo "LOCKER_PATH=unset"
+    echo "ARMORY_PATH=unset"
+  fi
+  if command -v ax >/dev/null 2>&1; then
+    echo "[ok] ax command available at $(command -v ax)"
+  else
+    echo "[warn] ax command not in PATH"
+    failed=1
+  fi
+  if [[ -f "$ax_path" ]]; then
+    echo "[ok] installed ax path present"
+  else
+    echo "[warn] installed ax path missing"
+    failed=1
+  fi
+
+  if [[ -f "$zlocal" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$zlocal"; then
+    echo "[ok] overlay block present"
+  else
+    echo "[warn] overlay block missing from ~/.zshrc.local"
+    failed=1
+  fi
+  if [[ -n "$repo_root" && -d "${repo_root}/locker" ]]; then
+    echo "[ok] locker path present"
+  else
+    echo "[warn] locker path missing"
+    failed=1
+  fi
+  if [[ -n "$repo_root" && -d "${repo_root}/armory" ]]; then
+    echo "[ok] armory path present"
+  else
+    echo "[warn] armory path missing"
+    failed=1
+  fi
+  echo ""
+
+  echo "[BluxGPT layer]"
+  echo "BLUXGPT_READY=${BLUXGPT_READY:-0}"
+  echo "BLUXGPT_VERSION=${BLUXGPT_VERSION:-missing}"
+  echo "BLUXGPT_REPO_ROOT=${BLUXGPT_REPO_ROOT:-unset}"
+  echo "BLUXGPT_CLI_PATH=${bluxgpt_cli:-unset}"
+  if command -v blux >/dev/null 2>&1; then
+    echo "[ok] blux command available at $(command -v blux)"
+  else
+    echo "[warn] blux command unavailable"
+  fi
+  if [[ "$(_ax_bluxgpt_overlay_present)" == "1" ]]; then
+    echo "[ok] BluxGPT overlay markers appear present in ~/.zshrc.local"
+  else
+    echo "[warn] BluxGPT overlay markers not detected in ~/.zshrc.local"
+  fi
+  if [[ "$(_ax_bluxgpt_available)" == "1" ]]; then
+    echo "[ok] BluxGPT backend available (ready + repo + cli.py)"
+  else
+    echo "[warn] BluxGPT backend unavailable; gpt-4o-mini fallback will be used by Overwatch AI"
+  fi
+  if [[ -n "${OPENAI_API_KEY:-}" && -n "${OPENAI_MODEL:-}" ]]; then
+    echo "[ok] fallback OPENAI_API_KEY and OPENAI_MODEL appear set in environment"
+  else
+    echo "[warn] fallback OPENAI_API_KEY and/or OPENAI_MODEL missing in environment"
+  fi
 
   if [[ -d "$HOME/.config/axiom" ]]; then
     echo "[ok] config directory present"
   else
-    echo "[fail] missing $HOME/.config/axiom"
-    failed=1
-  fi
-
-  if [[ -f "$HOME/.zshrc.local" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$HOME/.zshrc.local"; then
-    echo "[ok] overlay block present"
-  else
-    echo "[fail] overlay block missing from ~/.zshrc.local"
-    failed=1
-  fi
-
-  if [[ -f "$HOME/.blux10k/VERSION" ]]; then
-    echo "[ok] blux10k version: $(_ax_blux_version)"
-  else
-    echo "[fail] blux10k not detected at ~/.blux10k"
+    echo "[warn] missing $HOME/.config/axiom"
     failed=1
   fi
 
@@ -155,8 +278,8 @@ _ax_armory() {
 }
 
 _ax_ai() {
-  if [[ "${BLUXGPT_READY:-0}" != "1" ]]; then
-    echo "BluxGPT is not installed. Run cockpit/bin/gpt-4o-mini.sh first."
+  if [[ "$(_ax_bluxgpt_available)" != "1" ]]; then
+    echo "BluxGPT is not available (requires BLUXGPT_READY=1 + BLUXGPT_REPO_ROOT + bluxgpt/cli.py)."
     return 1
   fi
 
