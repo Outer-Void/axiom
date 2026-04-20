@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# AXIOM shell command definition; intended to be sourced.
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  echo "This file must be sourced from ~/.zshrc.local via the AXIOM overlay."
+  exit 1
+fi
+
+_ax_repo_root() {
+  if [[ -n "${AXIOM_REPO_ROOT:-}" && -d "${AXIOM_REPO_ROOT}" ]]; then
+    printf '%s\n' "${AXIOM_REPO_ROOT}"
+    return 0
+  fi
+  local source_dir
+  source_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+  if [[ -d "${source_dir}/../../.." ]]; then
+    (cd -P "${source_dir}/../../.." >/dev/null 2>&1 && pwd -P)
+    return 0
+  fi
+  return 1
+}
+
+_ax_version_value() {
+  local repo_root
+  repo_root="$(_ax_repo_root 2>/dev/null || true)"
+
+  if [[ -n "${AXIOM_VERSION:-}" ]]; then
+    printf '%s\n' "${AXIOM_VERSION}"
+    return 0
+  fi
+
+  if [[ -n "$repo_root" && -f "${repo_root}/VERSION" ]]; then
+    tr -d '[:space:]' <"${repo_root}/VERSION"
+    return 0
+  fi
+
+  printf '%s\n' "unknown"
+}
+
+_ax_blux_version() {
+  local version_file="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/VERSION"
+  if [[ -f "$version_file" ]]; then
+    tr -d '[:space:]' <"$version_file"
+  else
+    printf '%s\n' "missing"
+  fi
+}
+
+_ax_help() {
+  cat <<'HELP'
+ax <command>
+
+Commands:
+  help        Show this help
+  version     Print AXIOM, blux10k, and BluxGPT versions
+  launch      Run AXIOM launch.sh
+  status      Show AXIOM command and overlay status
+  doctor      Validate AXIOM + blux10k prereqs
+  locker      Run locker tools shell
+  armory      Run armory shell
+  ai          Proxy to blux when BLUXGPT_READY=1
+  uninstall   Remove AXIOM overlay and installed ax command
+HELP
+}
+
+_ax_launch() {
+  local repo_root
+  repo_root="$(_ax_repo_root)" || {
+    echo "AXIOM repo root not found."
+    return 1
+  }
+
+  if [[ ! -x "${repo_root}/launch.sh" ]]; then
+    echo "launch.sh not found or not executable at ${repo_root}/launch.sh"
+    return 1
+  fi
+
+  "${repo_root}/launch.sh"
+}
+
+_ax_status() {
+  local ax_path="$HOME/tools/scripts/axiom/ax"
+  local zlocal="$HOME/.zshrc.local"
+
+  echo "AXIOM_VERSION=$(_ax_version_value)"
+  echo "AXIOM_REPO_ROOT=${AXIOM_REPO_ROOT:-unset}"
+  echo "AXIOM_COMMAND=$(command -v ax 2>/dev/null || echo unavailable)"
+  echo "INSTALLED_AX=$ax_path"
+  [[ -f "$ax_path" ]] && echo "AX_INSTALLED=1" || echo "AX_INSTALLED=0"
+  [[ -f "$zlocal" ]] && echo "ZSHRC_LOCAL=1" || echo "ZSHRC_LOCAL=0"
+  if [[ -f "$zlocal" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$zlocal"; then
+    echo "AXIOM_OVERLAY=1"
+  else
+    echo "AXIOM_OVERLAY=0"
+  fi
+}
+
+_ax_doctor() {
+  local failed=0
+
+  if [[ -d "$HOME/.config/axiom" ]]; then
+    echo "[ok] config directory present"
+  else
+    echo "[fail] missing $HOME/.config/axiom"
+    failed=1
+  fi
+
+  if [[ -f "$HOME/.zshrc.local" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$HOME/.zshrc.local"; then
+    echo "[ok] overlay block present"
+  else
+    echo "[fail] overlay block missing from ~/.zshrc.local"
+    failed=1
+  fi
+
+  if [[ -f "$HOME/.blux10k/VERSION" ]]; then
+    echo "[ok] blux10k version: $(_ax_blux_version)"
+  else
+    echo "[fail] blux10k not detected at ~/.blux10k"
+    failed=1
+  fi
+
+  if [[ "$failed" -ne 0 ]]; then
+    return 1
+  fi
+}
+
+_ax_locker() {
+  local repo_root
+  repo_root="$(_ax_repo_root)" || {
+    echo "AXIOM repo root not found."
+    return 1
+  }
+
+  if [[ -x "${repo_root}/locker/warpdrive.sh" ]]; then
+    "${repo_root}/locker/warpdrive.sh"
+  else
+    echo "Locker entrypoint not found: ${repo_root}/locker/warpdrive.sh"
+    return 1
+  fi
+}
+
+_ax_armory() {
+  local repo_root
+  repo_root="$(_ax_repo_root)" || {
+    echo "AXIOM repo root not found."
+    return 1
+  }
+
+  if [[ -x "${repo_root}/armory/armory.sh" ]]; then
+    "${repo_root}/armory/armory.sh"
+  else
+    echo "Armory entrypoint not found: ${repo_root}/armory/armory.sh"
+    return 1
+  fi
+}
+
+_ax_ai() {
+  if [[ "${BLUXGPT_READY:-0}" != "1" ]]; then
+    echo "BluxGPT is not installed. Run cockpit/bin/gpt-4o-mini.sh first."
+    return 1
+  fi
+
+  if ! command -v blux >/dev/null 2>&1; then
+    echo "BLUXGPT_READY=1 but 'blux' command is unavailable in PATH."
+    return 1
+  fi
+
+  blux "$@"
+}
+
+_ax_uninstall() {
+  local zlocal="$HOME/.zshrc.local"
+  local ax_path="$HOME/tools/scripts/axiom/ax"
+  local temp_file
+
+  if [[ -f "$zlocal" ]]; then
+    temp_file="$(mktemp)"
+    awk '
+      $0 == "### >>> AXIOM OVERLAY >>>" { skip=1; next }
+      $0 == "### <<< AXIOM OVERLAY <<<" { skip=0; next }
+      skip != 1 { print }
+    ' "$zlocal" >"$temp_file"
+    mv "$temp_file" "$zlocal"
+    echo "Removed AXIOM overlay from $zlocal"
+  fi
+
+  if [[ -f "$ax_path" ]]; then
+    rm -f "$ax_path"
+    echo "Removed $ax_path"
+  fi
+}
+
+ax() {
+  local cmd="${1:-help}"
+  case "$cmd" in
+    help|-h|--help)
+      _ax_help
+      ;;
+    version)
+      echo "AXIOM: $(_ax_version_value)"
+      echo "blux10k: $(_ax_blux_version)"
+      echo "BluxGPT: ${BLUXGPT_VERSION:-missing}"
+      ;;
+    launch)
+      shift
+      _ax_launch "$@"
+      ;;
+    status)
+      _ax_status
+      ;;
+    doctor)
+      _ax_doctor
+      ;;
+    locker)
+      shift
+      _ax_locker "$@"
+      ;;
+    armory)
+      shift
+      _ax_armory "$@"
+      ;;
+    ai)
+      shift
+      _ax_ai "$@"
+      ;;
+    uninstall)
+      _ax_uninstall
+      ;;
+    *)
+      echo "Unknown ax command: $cmd"
+      _ax_help
+      return 1
+      ;;
+  esac
+}
