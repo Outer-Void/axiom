@@ -6,6 +6,8 @@ AXIOM_DEV_HANDLE="Justadudeinspace (JADIS)"
 AXIOM_EMAIL="theoutervoid@outlook.com"
 AXIOM_GH_URL="https://github.com/Justadudeinspace"
 AXIOM_REPO_URL="https://github.com/Justadudeinspace/axiom"
+BLUXGPT_READY="${BLUXGPT_READY:-0}"
+BLUXGPT_VERSION="${BLUXGPT_VERSION:-}"
 
 # Return the absolute directory of the calling script.
 # FIXED: Added basic error handling

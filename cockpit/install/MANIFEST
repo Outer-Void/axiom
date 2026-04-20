@@ -1,2 +1,3 @@
 cockpit/bin/cockpit.sh
 cockpit/bin/blux10k.sh
+cockpit/bin/axiom_env.sh
