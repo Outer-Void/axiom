@@ -185,9 +185,29 @@ NONINTERACTIVE="$AXIOM_NONINTERACTIVE"
 # Execute staged installers
 ############################################
 
+stage_context() {
+  local rel="$1"
+  case "$rel" in
+    cockpit/bin/cockpit.sh)
+      echo "This stage provisions system dependencies and may wait on sudo/package-manager/network operations."
+      ;;
+    cockpit/bin/blux10k.sh)
+      echo "This stage validates blux10k and may require manual installer execution if noninteractive safety is not guaranteed."
+      ;;
+    cockpit/bin/axiom_env.sh)
+      echo "This stage installs AXIOM shell overlay files in your home directory."
+      ;;
+    *)
+      echo "This stage may perform environment setup operations."
+      ;;
+  esac
+}
+
 run_stage() {
   local rel="$1"
   local timeout_seconds="$2"
+  local stage_index="$3"
+  local stage_total="$4"
   local path="$REPO_ROOT/$rel"
   local started ended duration
 
@@ -195,7 +215,9 @@ run_stage() {
   [[ -f "$path" ]] || die "Missing installer: $rel"
   [[ -x "$path" ]] || die "Installer not executable: $rel"
 
-  log "==> RUN: $rel"
+  log "==> STAGE ${stage_index}/${stage_total}: $rel"
+  log "    Context: $(stage_context "$rel")"
+  log "    Timeout: ${timeout_seconds}s"
   started=$(date +%s)
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -203,9 +225,10 @@ run_stage() {
     return 0
   fi
 
+  log "    Running now; output from this stage is live below."
   local exit_code
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$timeout_seconds" "$path"
+    timeout --foreground "$timeout_seconds" "$path"
     exit_code=$?
   else
     log_warn "Timeout command not available; running without timeout for $rel"
@@ -266,15 +289,16 @@ else
 fi
 
 STAGE_COUNT=0
+TOTAL_STAGES=${#stage_list[@]}
 
 for stage in "${stage_list[@]}"; do
   STAGE_COUNT=$((STAGE_COUNT + 1))
-  log "Heartbeat: preparing to run stage $stage"
-  if ! run_stage "$stage" 1800; then
+  log "Heartbeat: preparing stage ${STAGE_COUNT}/${TOTAL_STAGES} ($stage)"
+  if ! run_stage "$stage" 1800 "$STAGE_COUNT" "$TOTAL_STAGES"; then
     log_warn "Stage failed: $stage"
     exit 1
   fi
-  log "Heartbeat: completed stage $stage"
+  log "Heartbeat: completed stage ${STAGE_COUNT}/${TOTAL_STAGES} ($stage)"
 done
 
 ############################################

@@ -105,33 +105,50 @@ blux_foundation_ready() {
   return 0
 }
 
+script_supports_noninteractive_flag() {
+  local installer="$1"
+  [ -f "$installer" ] || return 1
+  grep -Eq -- '(^|[^A-Za-z0-9_])--noninteractive([^A-Za-z0-9_]|$)' "$installer"
+}
+
+run_known_noninteractive_installer() {
+  local installer="$1"
+  local label="$2"
+
+  if ! script_supports_noninteractive_flag "$installer"; then
+    log_error "$label does not advertise --noninteractive support."
+    log_error "Refusing hidden/unsafe automation. Run manually and complete prompts: bash $installer"
+    return 1
+  fi
+
+  log_info "Running $label in explicit noninteractive mode"
+  log_info "If this fails, run manually: bash $installer --noninteractive"
+  if ! AXIOM_NONINTERACTIVE=1 bash "$installer" --noninteractive; then
+    log_error "$label failed with --noninteractive."
+    log_error "Re-run manually for full prompt visibility: bash $installer --noninteractive"
+    return 1
+  fi
+
+  return 0
+}
+
 run_blux_installer() {
   local installer
 
   if [ -x "$BLUX10K_INSTALL_DIR/install.sh" ]; then
     installer="$BLUX10K_INSTALL_DIR/install.sh"
-    if AXIOM_NONINTERACTIVE=1 "$installer" --noninteractive >/dev/null 2>&1; then
-      log_info "Executed blux10k install.sh with --noninteractive"
-      return 0
-    fi
-    if AXIOM_NONINTERACTIVE=1 "$installer" >/dev/null 2>&1; then
-      log_info "Executed blux10k install.sh without interactive input"
-      return 0
-    fi
+    run_known_noninteractive_installer "$installer" "blux10k install.sh"
+    return $?
   fi
 
   if [ -x "$BLUX10K_INSTALL_DIR/cp_dotfiles.sh" ]; then
     installer="$BLUX10K_INSTALL_DIR/cp_dotfiles.sh"
-    if AXIOM_NONINTERACTIVE=1 bash "$installer" --noninteractive >/dev/null 2>&1; then
-      log_info "Executed blux10k cp_dotfiles.sh with --noninteractive"
-      return 0
-    fi
-    if yes '' | AXIOM_NONINTERACTIVE=1 bash "$installer" >/dev/null 2>&1; then
-      log_warn "Executed blux10k cp_dotfiles.sh with piped defaults"
-      return 0
-    fi
+    run_known_noninteractive_installer "$installer" "blux10k cp_dotfiles.sh"
+    return $?
   fi
 
+  log_error "No supported blux10k installer entrypoint found under $BLUX10K_INSTALL_DIR"
+  log_error "Run manually after verifying checkout: ls -la $BLUX10K_INSTALL_DIR"
   return 1
 }
 
@@ -147,7 +164,8 @@ install_or_update_blux10k() {
   fi
 
   if ! run_blux_installer; then
-    log_error "Unable to run blux10k installer non-interactively. Run manually: $BLUX10K_INSTALL_DIR/install.sh"
+    log_error "Unable to run blux10k installer safely in noninteractive mode."
+    log_error "Manual fallback: cd $BLUX10K_INSTALL_DIR && bash install.sh"
     return 1
   fi
 

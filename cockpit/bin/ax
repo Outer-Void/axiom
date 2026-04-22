@@ -38,12 +38,21 @@ _ax_version_value() {
 }
 
 _ax_blux_version() {
+  if [[ -n "${BLUX10K_VERSION:-}" ]]; then
+    printf '%s\n' "${BLUX10K_VERSION}"
+    return 0
+  fi
+
   local version_file="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/VERSION"
   if [[ -f "$version_file" ]]; then
     tr -d '[:space:]' <"$version_file"
   else
     printf '%s\n' "missing"
   fi
+}
+
+_ax_blux_scripts_path() {
+  printf '%s\n' "$HOME/tools/scripts"
 }
 
 _ax_bluxgpt_repo_root() {
@@ -120,7 +129,7 @@ _ax_status() {
   repo_root="$(_ax_repo_root 2>/dev/null || true)"
   local ax_path="$HOME/tools/scripts/axiom/ax"
   local zlocal="$HOME/.zshrc.local"
-  local blux10k_scripts="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/tools/scripts"
+  local blux10k_scripts="$(_ax_blux_scripts_path)"
   local locker_path=""
   local armory_path=""
   if [[ -n "$repo_root" ]]; then
@@ -146,7 +155,7 @@ _ax_doctor() {
   repo_root="$(_ax_repo_root 2>/dev/null || true)"
   local ax_path="$HOME/tools/scripts/axiom/ax"
   local zlocal="$HOME/.zshrc.local"
-  local blux10k_scripts="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/tools/scripts"
+  local blux10k_scripts="$(_ax_blux_scripts_path)"
   local bluxgpt_cli
   bluxgpt_cli="$(_ax_bluxgpt_cli_path)"
 

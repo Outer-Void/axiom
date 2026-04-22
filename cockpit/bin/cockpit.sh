@@ -58,7 +58,7 @@ ensure_root_or_sudo() {
 apt_update_once() {
   local marker="/tmp/cockpit-apt-updated"
   if [ ! -f "$marker" ]; then
-    log_info "Updating apt package lists"
+    log_info "Updating apt package lists (this may take a while and may require sudo privileges)"
     if ! axiom_apt_update; then
       if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
         log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
@@ -88,9 +88,11 @@ apt_install() {
   if [ "$COCKPIT_PLATFORM" != "proot-debian" ]; then
     ensure_root_or_sudo || return 1
   fi
+  log_info "Refreshing apt package lists before installation"
   apt_update_once || return 1
 
-  log_info "Installing packages: ${packages[*]}"
+  log_info "Installing packages via apt: ${packages[*]}"
+  log_info "Waiting on apt install completion..."
   if ! axiom_apt_install "${packages[@]}"; then
     if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
       log_error "sudo apt install failed. Ensure sudo is installed and configured for passwordless use."
@@ -118,8 +120,12 @@ pkg_install() {
   fi
 
   axiom_require_command pkg || return 1
-  log_info "Installing packages: ${packages[*]}"
-  pkg install -y "${packages[@]}"
+  log_info "Installing packages via pkg: ${packages[*]}"
+  log_info "Waiting on Termux pkg install completion..."
+  if ! pkg install -y "${packages[@]}"; then
+    log_error "pkg install failed for: ${packages[*]}"
+    return 1
+  fi
 }
 
 run_as_user() {
@@ -287,14 +293,17 @@ ensure_gh_repo() {
   distro="$(lsb_release -cs 2>/dev/null || echo stable)"
 
   if [ ! -f "$keyring" ]; then
-    log_info "Adding GitHub CLI apt repository"
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | {
+    log_info "Adding GitHub CLI apt repository keyring (requires network + sudo/root)"
+    if ! curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | {
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         dd of="$keyring" >/dev/null 2>&1
       else
         sudo dd of="$keyring" >/dev/null 2>&1
       fi
-    }
+    }; then
+      log_error "Failed to fetch/install GitHub CLI keyring."
+      return 1
+    fi
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       chmod go+r "$keyring"
     else
@@ -310,6 +319,7 @@ ensure_gh_repo() {
     fi
   fi
 
+  log_info "Refreshing apt package lists after GitHub CLI repository changes"
   apt_update_once
 }
 
@@ -317,14 +327,17 @@ install_nodesource_node() {
   if axiom_command_exists node; then
     return 0
   fi
-  log_info "Configuring NodeSource Node.js repository"
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | {
+  log_info "Configuring NodeSource Node.js repository (network + sudo/root required)"
+  if ! curl -fsSL https://deb.nodesource.com/setup_lts.x | {
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       bash -
     else
       sudo -E bash -
     fi
-  }
+  }; then
+    log_error "NodeSource repository bootstrap failed."
+    return 1
+  fi
   apt_install nodejs
 }
 
@@ -342,11 +355,17 @@ install_nvm_node() {
 
   if [ ! -d "$nvm_dir" ]; then
     log_info "Installing NVM for user $target_user"
-    run_as_user "$target_user" bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"
+    if ! run_as_user "$target_user" bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"; then
+      log_error "NVM install script failed for user $target_user"
+      return 1
+    fi
   fi
 
   log_info "Installing Node.js LTS via NVM"
-  run_as_user "$target_user" bash -c "source '$nvm_dir/nvm.sh' && nvm install --lts && nvm alias default 'lts/*'"
+  if ! run_as_user "$target_user" bash -c "source '$nvm_dir/nvm.sh' && nvm install --lts && nvm alias default 'lts/*'"; then
+    log_error "Node.js installation via NVM failed for user $target_user"
+    return 1
+  fi
 }
 
 ensure_user() {
@@ -455,7 +474,9 @@ provision_debian() {
     tmux
   )
 
+  log_info "Provisioning Debian essentials (apt may prompt for sudo credentials)."
   apt_install "${essentials[@]}"
+  log_info "Provisioning Debian development tools."
   apt_install "${dev_tools[@]}"
 
   if [ "$BLUX_INSTALL_EXTRAS" = "1" ]; then
@@ -464,6 +485,7 @@ provision_debian() {
 
   configure_locales
 
+  log_info "Ensuring GitHub CLI apt repository is configured."
   ensure_gh_repo
   apt_install gh
 
@@ -817,12 +839,16 @@ provision_non_debian_linux() {
   )
 
   if axiom_command_exists dnf; then
+    log_info "Installing packages with dnf (may wait on sudo/password prompts)."
     sudo dnf install -y "${packages[@]}" || true
   elif axiom_command_exists yum; then
+    log_info "Installing packages with yum (may wait on sudo/password prompts)."
     sudo yum install -y "${packages[@]}" || true
   elif axiom_command_exists pacman; then
+    log_info "Installing packages with pacman (may wait on sudo/password prompts)."
     sudo pacman -Sy --noconfirm "${packages[@]}" || true
   elif axiom_command_exists zypper; then
+    log_info "Installing packages with zypper (may wait on sudo/password prompts)."
     sudo zypper install -y "${packages[@]}" || true
   else
     log_warn "No supported package manager found."
