@@ -50,19 +50,13 @@ print_manual_fallback_block() {
   local installer_hint="$1"
   cat <<EOF
 ============================================================
-AXIOM intentionally stopped stage 2 for safety (fail-closed).
-This is not a silent freeze.
-Stage 2 is incomplete and was not marked successful.
-
-Reason:
-- blux10k installer interactivity could not be guaranteed safely.
-- Hidden prompt automation is intentionally refused.
-
-Run these manual commands next (with visible prompts):
+AXIOM intentionally stopped at stage 2 (fail-closed).
+This is not a freeze.
+Run this exact manual installer command next:
   cd "$BLUX10K_INSTALL_DIR"
   $installer_hint
 
-After the manual installer completes, return to this repo and run:
+After it completes, return to this repo and run:
   ./axiom.sh
 ============================================================
 EOF
