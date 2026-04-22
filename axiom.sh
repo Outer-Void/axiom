@@ -233,21 +233,17 @@ run_stage() {
   fi
 
   log "    Running now; output from this stage is live below."
-  local exit_code
+  local exit_code=0
+  set +e
   if command -v timeout >/dev/null 2>&1; then
-    if ! timeout --foreground "$timeout_seconds" "$path"; then
-      exit_code=$?
-    else
-      exit_code=0
-    fi
+    timeout --foreground "$timeout_seconds" "$path"
+    exit_code=$?
   else
     log_warn "Timeout command not available; running without timeout for $rel"
-    if ! "$path"; then
-      exit_code=$?
-    else
-      exit_code=0
-    fi
+    "$path"
+    exit_code=$?
   fi
+  set -e
 
   ended=$(date +%s)
   duration=$((ended - started))
@@ -257,6 +253,12 @@ run_stage() {
   if [[ $exit_code -eq 124 ]]; then
     log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s; stage was terminated)"
     return 1
+  elif [[ $exit_code -eq 126 ]]; then
+    log_warn "<== FAILED: $rel (stage could not execute: permission or interpreter issue)"
+    return 126
+  elif [[ $exit_code -eq 127 ]]; then
+    log_warn "<== FAILED: $rel (stage command not found while starting)"
+    return 127
   elif [[ $exit_code -ne 0 ]]; then
     log_warn "<== FAILED: $rel (stage exited non-zero: $exit_code, duration: ${duration}s)"
     return $exit_code
