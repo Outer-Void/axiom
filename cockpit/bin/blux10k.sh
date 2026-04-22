@@ -46,6 +46,27 @@ log_error() {
   fi
 }
 
+print_manual_fallback_block() {
+  local installer_hint="$1"
+  cat <<EOF
+============================================================
+AXIOM stage 2 stopped intentionally (fail-closed).
+AXIOM did not freeze.
+
+Reason:
+- blux10k installer interactivity could not be guaranteed safely.
+- Hidden prompt automation is intentionally refused.
+
+Run the installer manually with visible prompts:
+  cd "$BLUX10K_INSTALL_DIR"
+  $installer_hint
+
+After completion, re-run:
+  ./axiom.sh
+============================================================
+EOF
+}
+
 version_ge() {
   local left="$1"
   local right="$2"
@@ -117,7 +138,7 @@ run_known_noninteractive_installer() {
 
   if ! script_supports_noninteractive_flag "$installer"; then
     log_error "$label does not advertise --noninteractive support."
-    log_error "Refusing hidden/unsafe automation. Run manually and complete prompts: bash $installer"
+    print_manual_fallback_block "bash \"$installer\""
     return 1
   fi
 
@@ -125,7 +146,7 @@ run_known_noninteractive_installer() {
   log_info "If this fails, run manually: bash $installer --noninteractive"
   if ! AXIOM_NONINTERACTIVE=1 bash "$installer" --noninteractive; then
     log_error "$label failed with --noninteractive."
-    log_error "Re-run manually for full prompt visibility: bash $installer --noninteractive"
+    print_manual_fallback_block "bash \"$installer\" --noninteractive"
     return 1
   fi
 
@@ -148,7 +169,7 @@ run_blux_installer() {
   fi
 
   log_error "No supported blux10k installer entrypoint found under $BLUX10K_INSTALL_DIR"
-  log_error "Run manually after verifying checkout: ls -la $BLUX10K_INSTALL_DIR"
+  print_manual_fallback_block "ls -la \"$BLUX10K_INSTALL_DIR\""
   return 1
 }
 
@@ -165,7 +186,7 @@ install_or_update_blux10k() {
 
   if ! run_blux_installer; then
     log_error "Unable to run blux10k installer safely in noninteractive mode."
-    log_error "Manual fallback: cd $BLUX10K_INSTALL_DIR && bash install.sh"
+    print_manual_fallback_block "bash install.sh"
     return 1
   fi
 
