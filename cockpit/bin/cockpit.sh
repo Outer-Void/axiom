@@ -270,6 +270,7 @@ configure_locales() {
   log_info "Configuring locales (updating /etc/locale.gen and running locale-gen if available)."
   if [ -f /etc/locale.gen ]; then
     if grep -q '^# en_US.UTF-8 UTF-8' /etc/locale.gen; then
+      log_info "Locale step: enabling en_US.UTF-8 in /etc/locale.gen (sudo/root may prompt)."
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         sed -i 's/^# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
       else
@@ -277,6 +278,7 @@ configure_locales() {
       fi
     fi
     if axiom_command_exists locale-gen; then
+      log_info "Locale step: running locale-gen (this can take time)."
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         locale-gen
       else
@@ -323,7 +325,7 @@ ensure_gh_repo() {
     fi
   fi
 
-  log_info "Refreshing apt package lists after GitHub CLI repository changes"
+  log_info "Refreshing apt package lists after GitHub CLI repository changes (apt update may take time)."
   apt_update_once
 }
 
@@ -358,7 +360,7 @@ install_nvm_node() {
   fi
 
   if [ ! -d "$nvm_dir" ]; then
-    log_info "Installing NVM for user $target_user"
+    log_info "Installing NVM for user $target_user (curl bootstrap; network required)."
     if ! run_as_user "$target_user" bash -c "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash"; then
       log_error "NVM install script failed for user $target_user"
       return 1
@@ -393,7 +395,7 @@ ensure_user_sudo() {
   ensure_root_or_sudo || return 1
 
   if axiom_command_exists sudo; then
-    log_info "Adding user to sudo group: $user"
+    log_info "User setup: adding user to sudo group: $user (sudo/root required)."
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       usermod -aG sudo "$user"
     else
@@ -402,7 +404,7 @@ ensure_user_sudo() {
   fi
 
   if [ "$BLUX_SUDO_PASSWORDLESS" = "1" ]; then
-    log_info "Enabling passwordless sudo for $user"
+    log_info "User setup: writing sudoers policy for $user (sudo/root required)."
     local sudoers_file="/etc/sudoers.d/cockpit-$user"
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" >"$sudoers_file"
