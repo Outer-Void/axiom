@@ -51,6 +51,20 @@ _ax_blux_version() {
   fi
 }
 
+_ax_blux_ready() {
+  if [[ -n "${BLUX10K_READY:-}" ]]; then
+    printf '%s\n' "${BLUX10K_READY}"
+    return 0
+  fi
+
+  local version_file="${BLUX10K_INSTALL_DIR:-$HOME/.blux10k}/VERSION"
+  if [[ -f "$version_file" ]]; then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "0"
+  fi
+}
+
 _ax_blux_scripts_path() {
   printf '%s\n' "$HOME/tools/scripts"
 }
@@ -138,7 +152,7 @@ _ax_status() {
   fi
 
   echo "AXIOM status (trifecta runtime)"
-  echo "blux10k: ready=${BLUX10K_READY:-0} version=$(_ax_blux_version) scripts=${blux10k_scripts}"
+  echo "blux10k: ready=$(_ax_blux_ready) version=$(_ax_blux_version) scripts=${blux10k_scripts}"
   echo "AXIOM: ready=${AXIOM_READY:-0} version=$(_ax_version_value) repo=${repo_root:-unset}"
   echo "AXIOM: ax=$(command -v ax 2>/dev/null || echo unavailable) installed_ax=${ax_path} locker=${locker_path:-unset} armory=${armory_path:-unset}"
   if [[ -f "$zlocal" ]] && grep -q '### >>> AXIOM OVERLAY >>>' "$zlocal"; then
@@ -162,7 +176,7 @@ _ax_doctor() {
   echo "=== AXIOM Doctor: Trifecta Runtime Report ==="
   echo ""
   echo "[blux10k layer]"
-  echo "BLUX10K_READY=${BLUX10K_READY:-0}"
+  echo "BLUX10K_READY=$(_ax_blux_ready)"
   echo "BLUX10K_VERSION=$(_ax_blux_version)"
   echo "BLUX10K_SCRIPTS_PATH=${blux10k_scripts}"
   if [[ -d "${blux10k_scripts}" ]]; then

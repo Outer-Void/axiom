@@ -40,6 +40,8 @@ cd axiom
 ./launch.sh
 ```
 
+`./axiom.sh` is operationally staged and may pause for legitimate long-running provisioning (sudo, apt, curl/bootstrap, locale generation). Keep the terminal attached and read live logs.
+
 ### Installer behavior (important)
 
 `./axiom.sh` runs a strict staged sequence:
@@ -50,7 +52,9 @@ cd axiom
 
 Each stage runs with a timeout and live output. AXIOM does not hide installer output and does not silently auto-answer prompts.
 
-If a child installer cannot be proven safe for noninteractive execution, AXIOM fails closed with a manual command so you can run it directly with visible prompts.
+If a child installer cannot be proven safe for noninteractive execution, AXIOM fails closed with a manual command block so you can run it directly with visible prompts.
+
+Stage 2 (`cockpit/bin/blux10k.sh`) may require manual confirmation/installation depending on the upstream installer behavior. AXIOM will stop intentionally rather than attempt hidden interactive automation, and it will not report success for an incomplete stage.
 
 ---
 

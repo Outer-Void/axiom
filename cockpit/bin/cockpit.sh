@@ -49,6 +49,7 @@ ensure_root_or_sudo() {
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     return 0
   fi
+  log_info "Root privileges are required for this step; checking sudo availability."
   if axiom_command_exists sudo; then
     return 0
   fi
@@ -58,7 +59,7 @@ ensure_root_or_sudo() {
 apt_update_once() {
   local marker="/tmp/cockpit-apt-updated"
   if [ ! -f "$marker" ]; then
-    log_info "Updating apt package lists (this may take a while and may require sudo privileges)"
+    log_info "Starting apt update (this can take time and may block on sudo/network)."
     if ! axiom_apt_update; then
       if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
         log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
@@ -88,10 +89,11 @@ apt_install() {
   if [ "$COCKPIT_PLATFORM" != "proot-debian" ]; then
     ensure_root_or_sudo || return 1
   fi
-  log_info "Refreshing apt package lists before installation"
+  log_info "Preparing apt install transaction for: ${packages[*]}"
+  log_info "Refreshing apt package lists before apt install"
   apt_update_once || return 1
 
-  log_info "Installing packages via apt: ${packages[*]}"
+  log_info "Starting apt install for: ${packages[*]}"
   log_info "Waiting on apt install completion..."
   if ! axiom_apt_install "${packages[@]}"; then
     if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
@@ -265,6 +267,7 @@ cockpit_mktemp() {
 }
 
 configure_locales() {
+  log_info "Configuring locales (updating /etc/locale.gen and running locale-gen if available)."
   if [ -f /etc/locale.gen ]; then
     if grep -q '^# en_US.UTF-8 UTF-8' /etc/locale.gen; then
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -293,7 +296,7 @@ ensure_gh_repo() {
   distro="$(lsb_release -cs 2>/dev/null || echo stable)"
 
   if [ ! -f "$keyring" ]; then
-    log_info "Adding GitHub CLI apt repository keyring (requires network + sudo/root)"
+    log_info "Bootstrapping GitHub CLI keyring via curl (network + sudo/root required)."
     if ! curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | {
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         dd of="$keyring" >/dev/null 2>&1
@@ -312,6 +315,7 @@ ensure_gh_repo() {
   fi
 
   if [ ! -f "$source_list" ]; then
+    log_info "Configuring GitHub CLI apt source list (requires sudo/root)."
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages %s main\n' "$(dpkg --print-architecture)" "$keyring" "$distro" >"$source_list"
     else
@@ -327,7 +331,7 @@ install_nodesource_node() {
   if axiom_command_exists node; then
     return 0
   fi
-  log_info "Configuring NodeSource Node.js repository (network + sudo/root required)"
+  log_info "Bootstrapping NodeSource repository via curl (network + sudo/root required)."
   if ! curl -fsSL https://deb.nodesource.com/setup_lts.x | {
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       bash -
@@ -376,7 +380,7 @@ ensure_user() {
   fi
 
   ensure_root_or_sudo || return 1
-  log_info "Creating user: $user"
+  log_info "Creating user account: $user (requires sudo/root)."
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     useradd -m -s /bin/bash "$user"
   else
@@ -389,6 +393,7 @@ ensure_user_sudo() {
   ensure_root_or_sudo || return 1
 
   if axiom_command_exists sudo; then
+    log_info "Adding user to sudo group: $user"
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       usermod -aG sudo "$user"
     else

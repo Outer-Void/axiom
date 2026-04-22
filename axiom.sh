@@ -212,8 +212,15 @@ run_stage() {
   local started ended duration
 
   [[ -z "$rel" || "$rel" =~ ^# ]] && return 0
-  [[ -f "$path" ]] || die "Missing installer: $rel"
-  [[ -x "$path" ]] || die "Installer not executable: $rel"
+
+  if [[ ! -f "$path" ]]; then
+    log_warn "<== FAILED: $rel (missing stage executable: $path)"
+    return 127
+  fi
+  if [[ ! -x "$path" ]]; then
+    log_warn "<== FAILED: $rel (stage file is not executable: $path)"
+    return 126
+  fi
 
   log "==> STAGE ${stage_index}/${stage_total}: $rel"
   log "    Context: $(stage_context "$rel")"
@@ -228,12 +235,18 @@ run_stage() {
   log "    Running now; output from this stage is live below."
   local exit_code
   if command -v timeout >/dev/null 2>&1; then
-    timeout --foreground "$timeout_seconds" "$path"
-    exit_code=$?
+    if ! timeout --foreground "$timeout_seconds" "$path"; then
+      exit_code=$?
+    else
+      exit_code=0
+    fi
   else
     log_warn "Timeout command not available; running without timeout for $rel"
-    "$path"
-    exit_code=$?
+    if ! "$path"; then
+      exit_code=$?
+    else
+      exit_code=0
+    fi
   fi
 
   ended=$(date +%s)
@@ -242,10 +255,10 @@ run_stage() {
   log "==> DONE: $rel (exit code: $exit_code, duration: ${duration}s)"
 
   if [[ $exit_code -eq 124 ]]; then
-    log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s)"
+    log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s; stage was terminated)"
     return 1
   elif [[ $exit_code -ne 0 ]]; then
-    log_warn "<== FAILED: $rel (exit code: $exit_code, duration: ${duration}s)"
+    log_warn "<== FAILED: $rel (stage exited non-zero: $exit_code, duration: ${duration}s)"
     return $exit_code
   fi
 
