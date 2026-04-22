@@ -59,7 +59,7 @@ ensure_root_or_sudo() {
 apt_update_once() {
   local marker="/tmp/cockpit-apt-updated"
   if [ ! -f "$marker" ]; then
-    log_info "Starting apt update (this can take time and may block on sudo/network)."
+    log_info "Running apt update (this may take a few minutes and can block on sudo/network)."
     if ! axiom_apt_update; then
       if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
         log_error "sudo apt update failed. Ensure sudo is installed and configured for passwordless use."
@@ -93,8 +93,8 @@ apt_install() {
   log_info "Refreshing apt package lists before apt install"
   apt_update_once || return 1
 
-  log_info "Starting apt install for: ${packages[*]}"
-  log_info "Waiting on apt install completion..."
+  log_info "Running apt install for: ${packages[*]} (this may take a few minutes)."
+  log_info "Waiting for apt install to complete..."
   if ! axiom_apt_install "${packages[@]}"; then
     if [ "$COCKPIT_PLATFORM" = "proot-debian" ]; then
       log_error "sudo apt install failed. Ensure sudo is installed and configured for passwordless use."
