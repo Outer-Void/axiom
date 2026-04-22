@@ -40,6 +40,18 @@ cd axiom
 ./launch.sh
 ```
 
+### Installer behavior (important)
+
+`./axiom.sh` runs a strict staged sequence:
+
+1. `cockpit/bin/cockpit.sh`
+2. `cockpit/bin/blux10k.sh`
+3. `cockpit/bin/axiom_env.sh`
+
+Each stage runs with a timeout and live output. AXIOM does not hide installer output and does not silently auto-answer prompts.
+
+If a child installer cannot be proven safe for noninteractive execution, AXIOM fails closed with a manual command so you can run it directly with visible prompts.
+
 ---
 
 ## `cockpit/` — the command deck
@@ -54,6 +66,7 @@ Supports native Debian/Linux, WSL2 (Debian), and Termux via proot-distro Debian.
 
 `cockpit/bin/blux10k.sh`  
 blux10k prerequisite gate: verifies or installs the blux10k foundation required by AXIOM.
+It only executes known noninteractive installer paths. If that safety check is not met, it exits with an explicit manual fallback command.
 
 `cockpit/bin/overwatch.sh`  
 A full-screen TUI cockpit for operating AXIOM:
