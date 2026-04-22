@@ -299,6 +299,7 @@ ensure_gh_repo() {
 
   if [ ! -f "$keyring" ]; then
     log_info "Bootstrapping GitHub CLI keyring via curl (network + sudo/root required)."
+    log_info "GitHub CLI setup: writing keyring to $keyring"
     if ! curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | {
       if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         dd of="$keyring" >/dev/null 2>&1
@@ -318,6 +319,7 @@ ensure_gh_repo() {
 
   if [ ! -f "$source_list" ]; then
     log_info "Configuring GitHub CLI apt source list (requires sudo/root)."
+    log_info "GitHub CLI setup: writing apt source file to $source_list"
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages %s main\n' "$(dpkg --print-architecture)" "$keyring" "$distro" >"$source_list"
     else
@@ -334,6 +336,7 @@ install_nodesource_node() {
     return 0
   fi
   log_info "Bootstrapping NodeSource repository via curl (network + sudo/root required)."
+  log_info "NodeSource setup: running repository bootstrap script"
   if ! curl -fsSL https://deb.nodesource.com/setup_lts.x | {
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
       bash -
@@ -368,6 +371,7 @@ install_nvm_node() {
   fi
 
   log_info "Installing Node.js LTS via NVM"
+  log_info "Node.js setup: this may take time while nvm downloads and compiles binaries."
   if ! run_as_user "$target_user" bash -c "source '$nvm_dir/nvm.sh' && nvm install --lts && nvm alias default 'lts/*'"; then
     log_error "Node.js installation via NVM failed for user $target_user"
     return 1

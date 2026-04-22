@@ -210,14 +210,21 @@ run_stage() {
   local stage_total="$4"
   local path="$REPO_ROOT/$rel"
   local started ended duration
+  LAST_STAGE_RESULT="unknown"
+  LAST_STAGE_EXIT_CODE=1
+  LAST_STAGE_DURATION=0
 
   [[ -z "$rel" || "$rel" =~ ^# ]] && return 0
 
   if [[ ! -f "$path" ]]; then
+    LAST_STAGE_RESULT="missing"
+    LAST_STAGE_EXIT_CODE=127
     log_warn "<== FAILED: $rel (missing stage executable: $path)"
     return 127
   fi
   if [[ ! -x "$path" ]]; then
+    LAST_STAGE_RESULT="not-executable"
+    LAST_STAGE_EXIT_CODE=126
     log_warn "<== FAILED: $rel (stage file is not executable: $path)"
     return 126
   fi
@@ -229,6 +236,8 @@ run_stage() {
 
   if [[ "$DRY_RUN" == "1" ]]; then
     log "    (dry-run)"
+    LAST_STAGE_RESULT="dry-run"
+    LAST_STAGE_EXIT_CODE=0
     return 0
   fi
 
@@ -247,24 +256,29 @@ run_stage() {
 
   ended=$(date +%s)
   duration=$((ended - started))
-
-  log "==> DONE: $rel (exit code: $exit_code, duration: ${duration}s)"
+  LAST_STAGE_DURATION="$duration"
+  LAST_STAGE_EXIT_CODE="$exit_code"
 
   if [[ $exit_code -eq 124 ]]; then
-    log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s; stage was terminated)"
-    return 1
+    LAST_STAGE_RESULT="timeout"
+    log_warn "<== TIMEOUT: $rel (exceeded ${timeout_seconds}s; stage was terminated, duration: ${duration}s)"
+    return 124
   elif [[ $exit_code -eq 126 ]]; then
+    LAST_STAGE_RESULT="not-executable"
     log_warn "<== FAILED: $rel (stage could not execute: permission or interpreter issue)"
     return 126
   elif [[ $exit_code -eq 127 ]]; then
+    LAST_STAGE_RESULT="command-not-found"
     log_warn "<== FAILED: $rel (stage command not found while starting)"
     return 127
   elif [[ $exit_code -ne 0 ]]; then
+    LAST_STAGE_RESULT="nonzero-exit"
     log_warn "<== FAILED: $rel (stage exited non-zero: $exit_code, duration: ${duration}s)"
     return $exit_code
   fi
 
-  log "<== OK:  $rel (duration: ${duration}s)"
+  LAST_STAGE_RESULT="success"
+  log "<== SUCCESS: $rel (exit code: 0, duration: ${duration}s)"
   return 0
 }
 
@@ -309,9 +323,32 @@ TOTAL_STAGES=${#stage_list[@]}
 for stage in "${stage_list[@]}"; do
   STAGE_COUNT=$((STAGE_COUNT + 1))
   log "Heartbeat: preparing stage ${STAGE_COUNT}/${TOTAL_STAGES} ($stage)"
-  if ! run_stage "$stage" 1800 "$STAGE_COUNT" "$TOTAL_STAGES"; then
-    log_warn "Stage failed: $stage"
-    exit 1
+  set +e
+  run_stage "$stage" 1800 "$STAGE_COUNT" "$TOTAL_STAGES"
+  stage_rc=$?
+  set -e
+  if [[ $stage_rc -ne 0 ]]; then
+    case "${LAST_STAGE_RESULT:-}" in
+      timeout)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} timed out: $stage (duration: ${LAST_STAGE_DURATION}s, timeout: 1800s)"
+        ;;
+      missing)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} missing: $stage"
+        ;;
+      not-executable)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} not executable: $stage"
+        ;;
+      command-not-found)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} could not start (command not found): $stage"
+        ;;
+      nonzero-exit)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} failed: $stage (exit: ${LAST_STAGE_EXIT_CODE}, duration: ${LAST_STAGE_DURATION}s)"
+        ;;
+      *)
+        log_warn "Install halted: stage ${STAGE_COUNT}/${TOTAL_STAGES} failed: $stage (exit: ${stage_rc})"
+        ;;
+    esac
+    exit "$stage_rc"
   fi
   log "Heartbeat: completed stage ${STAGE_COUNT}/${TOTAL_STAGES} ($stage)"
 done

@@ -51,6 +51,7 @@ cd axiom
 3. `cockpit/bin/axiom_env.sh`
 
 Each stage runs with a timeout and live output. AXIOM does not hide installer output and does not silently auto-answer prompts.
+Stage end states are reported distinctly (success, timeout, non-zero exit, or stage file/exec problems) so failures are not flattened into misleading "done" output.
 
 If a child installer cannot be proven safe for noninteractive execution, AXIOM fails closed with a manual command block so you can run it directly with visible prompts.
 

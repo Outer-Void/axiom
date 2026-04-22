@@ -12,4 +12,4 @@
 
 - It verifies blux10k readiness and version requirements.
 - It only runs installers when `--noninteractive` support is explicitly detectable.
-- If noninteractive safety cannot be guaranteed, it fails with a manual command instead of attempting hidden automation.
+- If noninteractive safety cannot be guaranteed, it intentionally stops stage 2, prints exact manual commands, and does not claim stage success.
