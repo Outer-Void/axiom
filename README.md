@@ -2,7 +2,10 @@
 
 > SENTINEL / NIGHT OPS — Debian-first dev cockpit
 
-AXIOM is my personal terminal operating environment and autonomous systems vessel.
+AXIOM is the Outer Void developer control-plane identity. Its CLI, `ax`, routes developer work to the
+authoritative engines (below). This repository also holds the AXIOM cockpit: the owner's Debian-first
+terminal operating environment that `ax` lives in. Version: `VERSION` (2.0.0). AXIOM Launcher, the
+Android product, is a separate repository (`void.os`).
 
 This repository is built around one core doctrine:
 
