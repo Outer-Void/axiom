@@ -16,8 +16,11 @@ engine logic, imports no engine package and post-processes no output.
     ax projects ...    -> god index          (GOD project discovery)
     ax inspect ...     -> blux-system        (BLUX System)
     ax capabilities .. -> god capabilities   (GOD), else blux capabilities (BLUX registry)
+    ax devices ...     -> voidforge          (VoidForge integration client; Stage 22)
 
-There is deliberately no `ax devices`. An engine is found on PATH, or through AX_BIN_<ENGINE>
+`ax devices` routes to the VoidForge client, which asks a running VoidForge. VoidForge stays the authority:
+writes need the person at the VoidForge device to confirm there, and AX adds nothing to a request.
+An engine is found on PATH, or through AX_BIN_<ENGINE>
 (for example AX_BIN_BLUX10K=/path/to/blux10k). When it is missing, AX says which engine and exits 69
 (EX_UNAVAILABLE). It never falls back to doing the work itself.
 """
@@ -60,10 +63,12 @@ ROUTES: dict[str, Route] = {
         Route("inspect", "BLUX System", "blux-system", default=("--help",), summary="execution truth: receipts and graphs"),
         Route("capabilities", "GOD", "god", prefix=("capabilities",), fallback=("blux", ("capabilities",)),
               summary="capability discovery (GOD, else the BLUX registry)"),
+        Route("devices", "VoidForge", "voidforge", default=("devices",),
+              summary="Android devices via VoidForge (writes are confirmed on the VoidForge device)"),
     )
 }
 VERSION_ARGS = {"blux10k": ["--version"], "god": ["version"], "blux": ["version"], "coga": ["--version"], "ca": ["--version"],
-                "lrc": ["version"], "dat": ["--version"], "blux-system": ["version"]}
+                "lrc": ["version"], "dat": ["--version"], "blux-system": ["version"], "voidforge": ["--version"]}
 
 
 def resolve(executable: str) -> str | None:

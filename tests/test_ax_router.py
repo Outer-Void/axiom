@@ -18,11 +18,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ROUTER = ROOT / "cockpit" / "ax" / "router.py"
 AX = ROOT / "cockpit" / "bin" / "ax-route"
-ENGINES = ("blux10k", "god", "blux", "coga", "ca", "lrc", "dat", "blux-system")
+ENGINES = ("blux10k", "god", "blux", "coga", "ca", "lrc", "dat", "blux-system", "voidforge")
 EXPECTED = {
     "env": ("blux10k", []), "tools": ("god", ["commands"]), "ask": ("blux", ["ask"]), "agent": ("blux", ["agent"]),
     "reason": ("coga", []), "build": ("ca", []), "create": ("lrc", []), "audit": ("dat", []), "projects": ("god", ["index"]),
-    "inspect": ("blux-system", []), "capabilities": ("god", ["capabilities"]),
+    "inspect": ("blux-system", []), "capabilities": ("god", ["capabilities"]), "devices": ("voidforge", []),
 }
 
 
@@ -52,6 +52,69 @@ class Stubs:
 
 def ax(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(AX), *args], capture_output=True, text=True, env=env, timeout=120, check=False)
+
+
+VOIDFORGE_CLIENT = ROOT.parent / "voidforge" / "integration" / "client" / "voidforge"
+
+
+class FakeVoidForge:
+    """Answers like VoidForge does for a write: not authorized at the device. Records what it receives."""
+
+    def __init__(self, path: Path) -> None:
+        import socket
+        import threading
+
+        self.seen: list[dict[str, object]] = []
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.bind(str(path))
+        self.sock.listen()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                req = json.loads(conn.makefile("rb").readline())
+                self.seen.append(req)
+                write = req.get("capability") not in (None, "device.list")
+                status = "authorization_declined" if write else "completed"
+                resp = {"protocol": "voidforge-integration/1", "id": req["id"], "status": status, "code": status.upper(), "receipt": {}}
+                conn.sendall((json.dumps(resp) + "\n").encode())
+
+
+@unittest.skipUnless(VOIDFORGE_CLIENT.exists(), "voidforge checkout not present")
+class Devices(unittest.TestCase):
+    def env(self, endpoint: Path) -> dict[str, str]:
+        stubs = Stubs(())
+        return {**stubs.env(), "AX_BIN_VOIDFORGE": str(VOIDFORGE_CLIENT), "VOIDFORGE_ENDPOINT": str(endpoint)}
+
+    def test_devices_routes_to_the_voidforge_client(self) -> None:
+        stubs = Stubs(ENGINES)
+        ax("devices", env=stubs.env())
+        self.assertEqual(stubs.calls()[-1], {"engine": "voidforge", "argv": ["devices"]})
+
+    def test_voidforge_disabled_fails_gracefully(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        proc = ax("devices", env=self.env(tmp / "absent.sock"))
+        self.assertEqual(proc.returncode, 69)
+        self.assertIn("not reachable", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_destructive_requests_still_need_the_person_at_voidforge(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        fake = FakeVoidForge(tmp / "vf.sock")
+        env = self.env(tmp / "vf.sock")
+        self.assertEqual(ax("devices", env=env).returncode, 0)
+        proc = ax("devices", "call", "device.flash", "--device", "d", "--target", "boot_a", "--source", "/img", "--sha256", "a" * 64, env=env)
+        self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+        self.assertIn("authorization_declined", proc.stdout)
+        refused = ax("devices", "call", "device.flash", "--param", "approved=yes", env=env)
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual([r["capability"] for r in fake.seen], ["device.list", "device.flash"])
+        self.assertTrue(all("approved" not in json.dumps(r) for r in fake.seen))
 
 
 class Routing(unittest.TestCase):
@@ -94,9 +157,9 @@ class Routing(unittest.TestCase):
         self.assertEqual(ax("env", "detect", env=env).returncode, 0)
         self.assertEqual(stubs.calls()[-1]["argv"], ["detect"])
 
-    def test_unknown_commands_and_no_devices(self) -> None:
+    def test_unknown_commands(self) -> None:
         stubs = Stubs(ENGINES)
-        self.assertEqual(ax("devices", env=stubs.env()).returncode, 2)
+        self.assertEqual(ax("device", env=stubs.env()).returncode, 2)
         self.assertEqual(ax(env=stubs.env()).returncode, 2)
         routes = json.loads(ax("routes", env=stubs.env()).stdout)
         self.assertEqual(sorted(routes), sorted(EXPECTED))

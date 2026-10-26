@@ -119,6 +119,7 @@ Control plane (routes to the real engine; AX never reimplements it):
   create        -> LRC (lrc)          audit        -> DAT (dat)
   projects      -> GOD (index)        inspect      -> BLUX System
   capabilities  -> GOD, else the BLUX registry
+  devices       -> VoidForge (writes confirmed on the VoidForge device)
 
 AXIOM cockpit:
   help        Show this help
@@ -374,7 +375,7 @@ ax() {
       shift
       _ax_route doctor "$@"
       ;;
-    env|tools|ask|agent|reason|build|create|audit|projects|inspect|capabilities|routes)
+    env|tools|ask|agent|reason|build|create|audit|projects|inspect|capabilities|devices|routes)
       # Stage 18 control plane: route to the engine, never reimplement it.
       _ax_route "$@"
       ;;

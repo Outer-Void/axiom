@@ -30,11 +30,14 @@ an engine is missing, `ax` says which one and exits 69. It never does the work i
 | `ax projects` | GOD (`god index`) |
 | `ax inspect` | BLUX System (`blux-system`) |
 | `ax capabilities` | GOD (`god capabilities`), else the BLUX registry |
+| `ax devices` | VoidForge (`voidforge` integration client) |
 
 - **Doctor.** `ax doctor` shows which engines resolve, plus blux10k's environment verdict.
 - **Routes.** `ax routes` prints the routing table.
 - **Overrides.** `AX_BIN_<ENGINE>` points `ax` at a specific engine executable.
-- **No devices.** There is deliberately no `ax devices`.
+- **Devices.** `ax devices` routes to the VoidForge client (Stage 22). VoidForge stays the authority: it
+  must be running with local integrations enabled, and every write is confirmed on the VoidForge device.
+  Without VoidForge, `ax devices` exits 69.
 - **Source.** The router is `cockpit/ax/router.py`, tested in `tests/test_ax_router.py`.
 - **Legacy check.** The previous AXIOM + blux10k + BluxGPT prerequisite check is `ax trifecta`.
 
