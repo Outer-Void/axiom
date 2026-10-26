@@ -78,8 +78,8 @@ MANIFEST
   [ "$rc" -eq 0 ] || fail "axiom.sh --dry-run with manifest should succeed"
   require_match "$out" 'Loading install manifest' "manifest load message emitted"
   require_match "$out" 'Manifest stage missing, skipping: missing/stage\.sh' "missing manifest stage is warned/skipped"
-  require_match "$out" 'RUN: cockpit/bin/cockpit\.sh' "first manifest stage run"
-  require_match "$out" 'RUN: cockpit/bin/blux10k\.sh' "second manifest stage run"
+  require_match "$out" 'STAGE [0-9]+/[0-9]+: cockpit/bin/cockpit\.sh' "first manifest stage run"
+  require_match "$out" 'STAGE [0-9]+/[0-9]+: cockpit/bin/blux10k\.sh' "second manifest stage run"
 }
 
 main() {

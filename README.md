@@ -12,6 +12,32 @@ AXIOM converges Termux, WSL2, Linux distros, and macOS into a predictable, profe
 
 ---
 
+## `ax`: the Outer Void control plane
+
+`ax` routes; it does not reimplement. Each command execs the real engine with your arguments unchanged. When
+an engine is missing, `ax` says which one and exits 69. It never does the work itself.
+
+| Command | Engine |
+|---|---|
+| `ax env` | blux10k (environment and toolchain authority) |
+| `ax tools` | GOD (`god commands`) |
+| `ax ask` | BLUX (`blux ask`) |
+| `ax agent` | BLUX Runtime (`blux agent`) |
+| `ax reason` | CogA (`coga`) |
+| `ax build` | cA (`ca`) |
+| `ax create` | LRC (`lrc`) |
+| `ax audit` | DAT (`dat`) |
+| `ax projects` | GOD (`god index`) |
+| `ax inspect` | BLUX System (`blux-system`) |
+| `ax capabilities` | GOD (`god capabilities`), else the BLUX registry |
+
+- **Doctor.** `ax doctor` shows which engines resolve, plus blux10k's environment verdict.
+- **Routes.** `ax routes` prints the routing table.
+- **Overrides.** `AX_BIN_<ENGINE>` points `ax` at a specific engine executable.
+- **No devices.** There is deliberately no `ax devices`.
+- **Source.** The router is `cockpit/ax/router.py`, tested in `tests/test_ax_router.py`.
+- **Legacy check.** The previous AXIOM + blux10k + BluxGPT prerequisite check is `ax trifecta`.
+
 ## Repository structure (high level)
 
 Each major directory contains its own `README.md` with detailed documentation.

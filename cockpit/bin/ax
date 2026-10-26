@@ -110,15 +110,25 @@ _ax_help() {
   cat <<'HELP'
 ax <command>
 
-Commands:
+Control plane (routes to the real engine; AX never reimplements it):
+  doctor        Which engines resolve, plus the blux10k environment verdict
+  routes        The routing table
+  env           -> blux10k            tools        -> GOD (commands)
+  ask           -> blux ask           agent        -> blux agent (BLUX Runtime)
+  reason        -> CogA (coga)        build        -> cA (ca)
+  create        -> LRC (lrc)          audit        -> DAT (dat)
+  projects      -> GOD (index)        inspect      -> BLUX System
+  capabilities  -> GOD, else the BLUX registry
+
+AXIOM cockpit:
   help        Show this help
   version     Print AXIOM, blux10k, and BluxGPT versions
   launch      Run AXIOM launch.sh
   status      Show AXIOM command and overlay status
-  doctor      Validate AXIOM + blux10k prereqs
+  trifecta    The previous AXIOM + blux10k + BluxGPT prerequisite check
   locker      Run locker tools shell
   armory      Run armory shell
-  ai          Proxy to blux when BLUXGPT_READY=1
+  ai          Deprecated alias for 'ax ask'
   uninstall   Remove AXIOM overlay and installed ax command
 HELP
 }
@@ -336,6 +346,12 @@ _ax_uninstall() {
   fi
 }
 
+_ax_route() {
+  local root
+  root="$(_ax_repo_root)" || { echo "ax: cannot locate the AXIOM repository" >&2; return 1; }
+  command python3 "${root}/cockpit/bin/ax-route" "$@"
+}
+
 ax() {
   local cmd="${1:-help}"
   case "$cmd" in
@@ -355,6 +371,14 @@ ax() {
       _ax_status
       ;;
     doctor)
+      shift
+      _ax_route doctor "$@"
+      ;;
+    env|tools|ask|agent|reason|build|create|audit|projects|inspect|capabilities|routes)
+      # Stage 18 control plane: route to the engine, never reimplement it.
+      _ax_route "$@"
+      ;;
+    trifecta)
       _ax_doctor
       ;;
     locker)
@@ -367,7 +391,8 @@ ax() {
       ;;
     ai)
       shift
-      _ax_ai "$@"
+      echo "ax: 'ax ai' is deprecated; use 'ax ask' (routes to blux)." >&2
+      _ax_route ask "$@"
       ;;
     uninstall)
       _ax_uninstall

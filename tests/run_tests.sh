@@ -165,8 +165,12 @@ test_logging() {
   type axiom_log_error >/dev/null 2>&1 || return 1
   type axiom_die >/dev/null 2>&1 || return 1
   
-  # Test axiom_die doesn't exit (returns 1)
-  axiom_die "Test error" 2>&1 | grep -q "error" || return 1
+  # axiom_die must return non-zero (not exit) and print the message. Capture first, then check: piping a
+  # deliberately failing command into grep under `set -o pipefail` was a false negative.
+  local out rc
+  out="$(axiom_die "Test error" 2>&1)" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  [[ "$out" == *"[axiom][error] Test error"* ]] || return 1
   
   return 0
 }
@@ -374,16 +378,24 @@ test_dry_run() {
   
   # This should not actually install anything
   if [ -f "cockpit/install/MANIFEST" ]; then
-    ./axiom.sh --dry-run 2>&1 | grep -q "dry-run" || return 1
+    # Capture, then match: `cmd | grep -q` under pipefail failed whenever grep exited early (SIGPIPE, 141).
+    local out
+    out="$(./axiom.sh --dry-run 2>&1)" || return 1
+    [[ "$out" == *"(dry-run)"* ]] || return 1
   fi
   
   return 0
 }
 
+test_ax_router() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -m unittest "$REPO_ROOT/tests/test_ax_router.py"
+}
+
 test_ax_trifecta_status_doctor() {
   local out
   set +u
-  out="$(bash -lc 'source "'"$COCKPIT_BIN_DIR"'/ax" && ax status; ax doctor || true' 2>&1)" || return 1
+  out="$(bash -lc 'source "'"$COCKPIT_BIN_DIR"'/ax" && ax status; ax trifecta || true' 2>&1)" || return 1
   set -u
 
   printf '%s' "$out" | grep -q "AXIOM status (trifecta runtime)" || return 1
@@ -438,6 +450,7 @@ run_integration_tests() {
     skip_test "axiom.sh - Dry run mode" "No MANIFEST file found"
   fi
   run_test "ax - Trifecta status/doctor report" test_ax_trifecta_status_doctor
+  run_test "ax - Control-plane router (python unittest)" test_ax_router
 }
 
 run_all_tests() {
