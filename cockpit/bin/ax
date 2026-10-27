@@ -2,8 +2,7 @@
 # AXIOM shell command definition; intended to be sourced.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  echo "This file must be sourced from ~/.zshrc.local via the AXIOM overlay."
-  exit 1
+  exec "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/ax-route" "$@"
 fi
 
 _ax_repo_root() {

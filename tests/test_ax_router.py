@@ -118,6 +118,14 @@ class Devices(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_direct_shell_entry_preserves_machine_output_and_exit_code(self) -> None:
+        stubs = Stubs(ENGINES)
+        proc = subprocess.run([str(ROOT / "cockpit" / "bin" / "ax"), "audit", "release", "--fail"],
+                              env=stubs.env(), capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 7)
+        self.assertEqual(proc.stdout, "stub release --fail\n")
+        self.assertEqual(stubs.calls()[-1], {"engine": "dat", "argv": ["release", "--fail"]})
+
     def test_every_command_execs_its_engine_with_arguments_unchanged(self) -> None:
         stubs = Stubs(ENGINES)
         for cmd, (engine, prefix) in EXPECTED.items():
