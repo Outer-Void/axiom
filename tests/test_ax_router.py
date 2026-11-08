@@ -165,6 +165,22 @@ class Routing(unittest.TestCase):
         self.assertEqual(ax("env", "detect", env=env).returncode, 0)
         self.assertEqual(stubs.calls()[-1]["argv"], ["detect"])
 
+    def test_broken_overrides_are_explained_not_crashes(self) -> None:
+        """OV-54: an override pointing at a directory, or at a file that cannot be started, used to end in a
+        Python traceback (exit 1)."""
+        stubs = Stubs(ENGINES)
+        base = {**stubs.env(), "PATH": "/usr/bin:/bin"}
+        proc = ax("audit", env={**base, "AX_BIN_DAT": str(stubs.dir)})  # a directory
+        self.assertEqual(proc.returncode, 69)
+        self.assertIn("routes to DAT (`dat`), which is not installed", proc.stderr)
+        broken = stubs.dir / "no-interpreter"
+        broken.write_text("echo hi\n")  # executable bit, but no #! line
+        broken.chmod(0o755)
+        proc = ax("audit", env={**base, "AX_BIN_DAT": str(broken)})
+        self.assertEqual(proc.returncode, 126)
+        self.assertIn("could not be started", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
     def test_unknown_commands(self) -> None:
         stubs = Stubs(ENGINES)
         self.assertEqual(ax("device", env=stubs.env()).returncode, 2)

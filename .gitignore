@@ -530,6 +530,9 @@ Carthage/Build/
 bin/
 gen/
 out/
+# AXIOM's cockpit/bin holds source scripts, not build output. OV-54: the rule above hid cockpit/bin/ax-route,
+# so it was never committed and `ax` failed on every clean clone.
+!cockpit/bin/
 
 # Gradle files
 .gradle/

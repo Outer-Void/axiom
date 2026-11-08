@@ -22,7 +22,8 @@ engine logic, imports no engine package and post-processes no output.
 writes need the person at the VoidForge device to confirm there, and AX adds nothing to a request.
 An engine is found on PATH, or through AX_BIN_<ENGINE>
 (for example AX_BIN_BLUX10K=/path/to/blux10k). When it is missing, AX says which engine and exits 69
-(EX_UNAVAILABLE). It never falls back to doing the work itself.
+(EX_UNAVAILABLE); an engine that exists but cannot be started exits 126. It never falls back to doing the
+work itself.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import sys
 from dataclasses import dataclass
 
 EX_UNAVAILABLE = 69
+EX_NOEXEC = 126  # the engine exists but cannot be executed
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,8 @@ VERSION_ARGS = {"blux10k": ["--version"], "god": ["version"], "blux": ["version"
 def resolve(executable: str) -> str | None:
     override = os.environ.get("AX_BIN_" + executable.upper().replace("-", "_"))
     if override:
-        return override if os.access(override, os.X_OK) else None
+        # A directory is "executable" to os.access; only a regular file can be an engine (OV-54).
+        return override if os.path.isfile(override) and os.access(override, os.X_OK) else None
     return shutil.which(executable)
 
 
@@ -158,7 +161,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EX_UNAVAILABLE
     argv_out = [*found[0], *(rest or list(route.default))]
-    os.execv(argv_out[0], argv_out)  # noqa: S606 - the engine replaces AX; exit code and output are the engine's
+    try:
+        os.execv(argv_out[0], argv_out)  # noqa: S606 - the engine replaces AX; exit code and output are the engine's
+    except OSError as exc:
+        # Found but not runnable (no interpreter line, wrong architecture, permissions): say so, exit 126 like a shell.
+        sys.stderr.write(f"ax: {route.engine} at {argv_out[0]} could not be started: {exc.strerror}. AX does not do this work itself.\n")
+        return EX_NOEXEC
     return 0  # pragma: no cover
 
 

@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""ax-route: executable entry for the AX router (the sourced `ax` shell function forwards here)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from ax.router import main  # noqa: E402
+
+sys.exit(main())
